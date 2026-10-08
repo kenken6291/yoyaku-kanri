@@ -7,7 +7,7 @@
  *  【スクリプトプロパティ】（プロジェクトの設定 → スクリプト プロパティ）
  *    GEMINI_API_KEY            : Gemini APIキー（必須：AI機能を使う場合）
  *    GEMINI_MODEL              : 使用モデル（setupDatabase で gemini-3.8-flash を自動設定）
- *    GEMINI_IMAGE_MODEL        : チラシ画像生成モデル（setupDatabase で gemini-2.5-flash-image を自動設定）
+ *    GEMINI_IMAGE_MODEL        : チラシ画像生成モデル（setupDatabase で gemini-3.8-flash-image を自動設定）
  *    GEMINI_FALLBACK_MODEL     : 任意。メインのモデルが混雑(503等)のとき自動で切り替える予備モデル
  *    SPREADSHEET_ID            : スタンドアロンGASの場合は必須（コンテナバインドなら省略可）
  *    DRIVE_FOLDER_ID           : チラシ保存フォルダID（省略時 setupDatabase で自動作成）
@@ -50,7 +50,7 @@ const CONFIG = Object.freeze({
   AI_RATE_LIMIT: 20,               // 10分あたりのAI呼び出し上限（ユーザー単位）
   HASH_ITERATIONS: 300,
   DEFAULT_GEMINI_MODEL: 'gemini-3.8-flash',
-  DEFAULT_GEMINI_IMAGE_MODEL: 'gemini-2.5-flash-image',
+  DEFAULT_GEMINI_IMAGE_MODEL: 'gemini-3.8-flash-image',
   AI_IMAGE_RATE_LIMIT: 10,         // 10分あたりの画像生成上限（ユーザー単位）
   DEFAULT_FOLDER_NAME: 'ReserveHub_Flyers',
   DEFAULT_CATEGORIES: ['語学・国際交流', 'スポーツ・健康', 'IT・ビジネス', 'ダンス・音楽', '料理・食', '趣味・クラフト', 'アウトドア', '地域・ボランティア', 'その他'],
