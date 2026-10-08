@@ -7,6 +7,7 @@
  *  【スクリプトプロパティ】（プロジェクトの設定 → スクリプト プロパティ）
  *    GEMINI_API_KEY            : Gemini APIキー（必須：AI機能を使う場合）
  *    GEMINI_MODEL              : 使用モデル（setupDatabase で gemini-3.8-flash を自動設定）
+ *    GEMINI_FALLBACK_MODEL     : 任意。メインのモデルが混雑(503等)のとき自動で切り替える予備モデル
  *    SPREADSHEET_ID            : スタンドアロンGASの場合は必須（コンテナバインドなら省略可）
  *    DRIVE_FOLDER_ID           : チラシ保存フォルダID（省略時 setupDatabase で自動作成）
  *    ADMIN_EMAIL               : 初期管理者のメール（setupDatabase で admin を自動発行）
@@ -296,6 +297,59 @@ function autoCloseEvents() {
     });
     Logger.log('自動締切: ' + n + '件');
   });
+}
+
+// ---------------------------------------------------------------------
+// 【手動実行用】メールのトラブル対応
+// ---------------------------------------------------------------------
+/** メール送信の診断：残り送信数・送信元を表示し、ADMIN_EMAIL にテストメールを送る */
+function checkMailSetup() {
+  const me = Session.getEffectiveUser().getEmail();
+  const to = str_(prop_('ADMIN_EMAIL', ''), 254).toLowerCase() || me;
+  Logger.log('送信元（GASの実行ユーザー）: ' + me);
+  Logger.log('本日の残り送信可能数: ' + MailApp.getRemainingDailyQuota());
+  const ok = sendMail_(to, '【' + CONFIG.APP_NAME + '】テストメール',
+    'これはメール送信のテストです。このメールが届いていれば設定は正常です。' + footer_());
+  Logger.log(ok
+    ? to + ' にテストメールを送信しました。届かない場合は迷惑メールフォルダを確認してください'
+    : '送信に失敗しました。上のエラー内容を確認してください');
+}
+
+/** ADMIN_EMAIL の管理者に仮パスワードを発行（未登録なら新規作成）し、実行ログにも表示する */
+function issueAdminTempPassword() {
+  const email = str_(prop_('ADMIN_EMAIL', ''), 254).toLowerCase();
+  if (!isEmail_(email)) throw new Error('スクリプトプロパティ ADMIN_EMAIL を正しく設定してください');
+  const tempPw = genTempPassword_();
+  withLock_(() => {
+    const u = DB.find(SHEET.USERS, 'email', email);
+    if (u) {
+      DB.update(SHEET.USERS, u, {
+        password_hash: makePasswordHash_(tempPw), is_temp_password: true, role: 'admin', status: 'active',
+        token: '', token_expires_at: '', updated_at: nowStr_(),
+      });
+    } else {
+      DB.insert(SHEET.USERS, newUserRow_(email, 'システム管理者', '', 'admin', tempPw));
+    }
+  });
+  const sent = sendTempPasswordMail_(email, 'システム管理者', tempPw, 'admin_issue');
+  Logger.log('管理者: ' + email);
+  Logger.log('仮パスワード: ' + tempPw + (sent ? '（メールも送信しました）' : '（メール送信は失敗）'));
+}
+
+/** 指定メールの会員に仮パスワードを再発行し、実行ログに表示する（メールが届かない会員の救済用） */
+function issueTempPasswordFor(email) {
+  email = str_(email || '', 254).toLowerCase();
+  if (!isEmail_(email)) throw new Error('issueTempPasswordFor("会員のメールアドレス") の形で、引数を書き換えてから実行してください');
+  const tempPw = genTempPassword_();
+  withLock_(() => {
+    const u = DB.find(SHEET.USERS, 'email', email);
+    if (!u) throw new Error('この会員は登録されていません: ' + email);
+    DB.update(SHEET.USERS, u, {
+      password_hash: makePasswordHash_(tempPw), is_temp_password: true,
+      token: '', token_expires_at: '', updated_at: nowStr_(),
+    });
+  });
+  Logger.log(email + ' の仮パスワード: ' + tempPw);
 }
 
 // ---------------------------------------------------------------------
@@ -1488,36 +1542,95 @@ function apiSetPaymentStatus_(u, p) {
 // ---------------------------------------------------------------------
 // Gemini API
 // ---------------------------------------------------------------------
+const GEMINI_RETRY_CODES = [429, 500, 502, 503, 504];
+const GEMINI_MAX_ATTEMPTS = 3;
+
 function callGemini_(opt) {
   const key = prop_('GEMINI_API_KEY', '');
-  if (!key) throw new AppError('CONFIG', 'GEMINI_API_KEY が設定されていません');
-  const model = prop_('GEMINI_MODEL', CONFIG.DEFAULT_GEMINI_MODEL);
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
-  const body = {
-    contents: opt.contents,
-    generationConfig: { temperature: opt.temperature === undefined ? 0.7 : opt.temperature, maxOutputTokens: 8192 },
-  };
-  if (opt.system) body.systemInstruction = { parts: [{ text: opt.system }] };
-  if (opt.json) {
-    body.generationConfig.responseMimeType = 'application/json';
-    if (opt.schema) body.generationConfig.responseSchema = opt.schema;
+  if (!key) throw new AppError('CONFIG', 'GEMINI_API_KEY が設定されていません（スクリプトプロパティを確認してください）');
+  const primary = str_(prop_('GEMINI_MODEL', CONFIG.DEFAULT_GEMINI_MODEL), 100);
+  const fallback = str_(prop_('GEMINI_FALLBACK_MODEL', ''), 100);
+  const models = fallback && fallback !== primary ? [primary, fallback] : [primary];
+
+  let lastErr = null;
+  for (let i = 0; i < models.length; i++) {
+    try {
+      return callGeminiModel_(models[i], key, opt);
+    } catch (e) {
+      lastErr = e;
+      // 混雑・一時障害・モデル未提供のときだけ予備モデルへ切り替え
+      if (!(e instanceof AppError) || ['AI_BUSY', 'AI_MODEL_NOT_FOUND'].indexOf(e.code) === -1) throw e;
+      if (i < models.length - 1) console.warn('Gemini: ' + models[i] + ' が利用できないため ' + models[i + 1] + ' に切り替えます（' + e.message + '）');
+    }
   }
-  const res = UrlFetchApp.fetch(url, {
-    method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
-    payload: JSON.stringify(body), muteHttpExceptions: true,
-  });
+  throw lastErr;
+}
+
+function callGeminiModel_(model, key, opt) {
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+  const buildBody = (useSchema) => {
+    const body = {
+      contents: opt.contents,
+      generationConfig: { temperature: opt.temperature === undefined ? 0.7 : opt.temperature, maxOutputTokens: 16384 },
+    };
+    if (opt.system) body.systemInstruction = { parts: [{ text: opt.system }] };
+    if (opt.json) {
+      body.generationConfig.responseMimeType = 'application/json';
+      if (useSchema && opt.schema) body.generationConfig.responseSchema = opt.schema;
+    }
+    return body;
+  };
+
+  let useSchema = !!(opt.json && opt.schema);
+  let res = null;
+  for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS; attempt++) {
+    res = UrlFetchApp.fetch(url, {
+      method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
+      payload: JSON.stringify(buildBody(useSchema)), muteHttpExceptions: true,
+    });
+    const c = res.getResponseCode();
+    if (c === 400 && useSchema) {
+      // スキーマ指定を受け付けないモデル向けにスキーマなしで再試行
+      console.warn('Gemini 400（スキーマ付き）→スキーマなしで再試行: ' + res.getContentText().slice(0, 300));
+      useSchema = false;
+      attempt--;
+      continue;
+    }
+    if (GEMINI_RETRY_CODES.indexOf(c) === -1 || attempt === GEMINI_MAX_ATTEMPTS) break;
+    const wait = 1500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500); // 約1.5秒→3秒
+    console.warn('Gemini ' + c + '（' + model + '）: ' + wait + 'ms 待って再試行 ' + (attempt + 1) + '/' + GEMINI_MAX_ATTEMPTS);
+    Utilities.sleep(wait);
+  }
+
   const code = res.getResponseCode();
   const text = res.getContentText();
   if (code !== 200) {
-    console.error('Gemini error ' + code + ': ' + text.slice(0, 1000));
-    if (code === 429) throw new AppError('AI_BUSY', 'AIが混み合っています。少し時間をおいてお試しください');
-    throw new AppError('AI_ERROR', 'AI呼び出しに失敗しました（' + code + '）');
+    console.error('Gemini error ' + code + ' (model=' + model + '): ' + text.slice(0, 1000));
+    let apiMsg = '';
+    try { apiMsg = (JSON.parse(text).error || {}).message || ''; } catch (_) { apiMsg = ''; }
+    if (code === 503 || code === 500 || code === 502 || code === 504) {
+      throw new AppError('AI_BUSY', 'AIサーバーが混雑しています（' + code + '）。1〜2分おいてからもう一度お試しください');
+    }
+    if (code === 429) throw new AppError('AI_BUSY', 'AIの利用上限に達したか混み合っています。少し時間をおいてお試しください');
+    if (code === 404) throw new AppError('AI_MODEL_NOT_FOUND', 'モデル「' + model + '」が見つかりません。スクリプトプロパティ GEMINI_MODEL を確認してください');
+    if (code === 400 && /api key/i.test(apiMsg)) throw new AppError('AI_ERROR', 'Gemini APIキーが無効です。GEMINI_API_KEY を確認してください');
+    if (code === 403) throw new AppError('AI_ERROR', 'Gemini APIの利用が許可されていません（APIキーの権限・有効化を確認してください）');
+    throw new AppError('AI_ERROR', 'AI呼び出しに失敗しました（' + code + '）' + (apiMsg ? '：' + apiMsg.slice(0, 200) : ''));
   }
+
   const data = JSON.parse(text);
+  if (data.promptFeedback && data.promptFeedback.blockReason) {
+    throw new AppError('AI_ERROR', '入力内容がAIの安全フィルタにより処理できませんでした。表現を変えてお試しください');
+  }
   const cand = data.candidates && data.candidates[0];
   const out = cand && cand.content && cand.content.parts
     ? cand.content.parts.filter((x) => !x.thought).map((x) => x.text || '').join('') : '';
-  if (!out) throw new AppError('AI_ERROR', 'AIから有効な応答が得られませんでした' + (cand && cand.finishReason ? '（' + cand.finishReason + '）' : ''));
+  if (!out) {
+    const reason = cand && cand.finishReason ? cand.finishReason : '';
+    if (reason === 'MAX_TOKENS') throw new AppError('AI_ERROR', 'AIの応答が長すぎて途中で止まりました。入力を短くしてもう一度お試しください');
+    if (reason === 'SAFETY') throw new AppError('AI_ERROR', 'AIの安全フィルタにより回答できませんでした。表現を変えてお試しください');
+    throw new AppError('AI_ERROR', 'AIから有効な応答が得られませんでした' + (reason ? '（' + reason + '）' : ''));
+  }
   return opt.json ? parseJsonLoose_(out) : out;
 }
 
@@ -1529,6 +1642,22 @@ function parseJsonLoose_(s) {
     try { return JSON.parse(m[0]); } catch (_) { /* fallthrough */ }
   }
   throw new AppError('AI_ERROR', 'AI応答の解析に失敗しました。もう一度お試しください');
+}
+
+/** 【手動実行用】Gemini接続テスト：モデル名・キー・応答を実行ログに表示 */
+function checkGemini() {
+  Logger.log('GEMINI_MODEL: ' + prop_('GEMINI_MODEL', '(未設定 → ' + CONFIG.DEFAULT_GEMINI_MODEL + ')'));
+  Logger.log('GEMINI_API_KEY: ' + (prop_('GEMINI_API_KEY', '') ? '設定あり' : '未設定'));
+  try {
+    const r = callGemini_({
+      json: true,
+      schema: { type: 'OBJECT', properties: { message: { type: 'STRING' } }, required: ['message'] },
+      contents: [{ role: 'user', parts: [{ text: '「接続テスト成功」と message に入れたJSONを返してください' }] }],
+    });
+    Logger.log('成功: ' + JSON.stringify(r));
+  } catch (e) {
+    Logger.log('失敗: ' + e.message);
+  }
 }
 
 /** 主催者向け：チラシ・告知文生成 */

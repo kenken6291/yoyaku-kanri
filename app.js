@@ -1405,9 +1405,17 @@ function openAiFlyer() {
     setBusy(btn, true, 'AIが作成中…');
     const box = w.querySelector('#ai-result');
     box.innerHTML = '<div class="typing" aria-label="作成中"><span></span><span></span><span></span></div>';
-    const d = await run(() => api('generateFlyerText', payload));
+    let d;
+    try {
+      d = await api('generateFlyerText', payload);
+    } catch (err) {
+      setBusy(btn, false);
+      box.className = 'rounded-2xl bg-rose-50 border border-rose-200 p-4 text-sm text-rose-700 flex flex-col items-center justify-center gap-2 min-h-[240px] text-center';
+      box.innerHTML = `${ic('circle-alert', 'w-6 h-6')}<p class="font-bold">作成できませんでした</p><p class="text-xs leading-relaxed break-all">${esc(err.message)}</p>`;
+      icons();
+      return;
+    }
     setBusy(btn, false);
-    if (!d) { box.textContent = '作成できませんでした。もう一度お試しください。'; return; }
     const r = d.result || {};
     const layout = r.layout || {};
     const layoutLabels = { headline_area: '見出し', visual: 'ビジュアル', color_palette: '配色', typography: '書体', info_block: '情報ブロック', call_to_action: '行動喚起' };
