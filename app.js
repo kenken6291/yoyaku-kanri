@@ -1181,7 +1181,10 @@ function bindFlyerUploader(root, { eventId = '' } = {}) {
     aiBtn.addEventListener('click', () => {
       const form = box.closest('form');
       const g = (n) => (form && form.elements[n] ? String(form.elements[n].value || '').trim() : '');
-      openAiImageModal({ title: g('title'), category: g('category'), description: g('description'), location: g('location') },
+      openAiImageModal({
+        title: g('title'), category: g('category'), description: g('description'), location: g('location'),
+        event_date: g('event_date'), start_time: g('start_time'),
+      },
         async (dataUrl) => {
           try {
             status.textContent = '画像を準備中…';
@@ -1198,6 +1201,104 @@ function bindFlyerUploader(root, { eventId = '' } = {}) {
   }
 }
 
+/** 画像の上に日本語の文字を正確なフォントで重ねる（AI画像の文字化け対策） */
+function wrapChars(ctx, text, maxW, maxLines) {
+  const lines = [];
+  let line = '';
+  for (const ch of Array.from(text)) {
+    if (line && ctx.measureText(line + ch).width > maxW) {
+      lines.push(line);
+      line = ch;
+      if (lines.length === maxLines - 1) { /* 最終行は残りすべて */ }
+    } else line += ch;
+  }
+  if (line) lines.push(line);
+  if (lines.length > maxLines) {
+    const head = lines.slice(0, maxLines - 1);
+    head.push(lines.slice(maxLines - 1).join(''));
+    return head;
+  }
+  return lines;
+}
+
+async function composeFlyer(src, { title = '', sub = '', position = 'top' } = {}) {
+  const img = await loadImage(src);
+  const max = 1600;
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  const W = c.width = Math.round(img.width * scale);
+  const H = c.height = Math.round(img.height * scale);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, 0, 0, W, H);
+  title = String(title || '').trim();
+  sub = String(sub || '').trim();
+  if (position === 'none' || (!title && !sub)) return c.toDataURL('image/jpeg', 0.88);
+
+  const FONT = '"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif';
+  try {
+    await Promise.all([
+      document.fonts.load(`900 48px "Noto Sans JP"`, title || 'あ'),
+      document.fonts.load(`700 24px "Noto Sans JP"`, sub || 'あ'),
+    ]);
+  } catch (_) { /* フォント読込失敗時は代替フォント */ }
+
+  const base = Math.min(W, H);
+  const pad = Math.round(W * 0.06);
+  const maxW = W - pad * 2;
+
+  // タイトル：1行に収まるまで縮小し、それでも長ければ折り返し（最大3行）
+  let size = Math.round(base * 0.12);
+  const minSize = Math.round(base * 0.07);
+  ctx.font = `900 ${size}px ${FONT}`;
+  while (title && size > minSize && ctx.measureText(title).width > maxW) { size -= 2; ctx.font = `900 ${size}px ${FONT}`; }
+  const tLines = title ? wrapChars(ctx, title, maxW, 3) : [];
+  const tLH = size * 1.22;
+
+  const subSize = Math.max(Math.round(base * 0.04), Math.round(size * 0.4));
+  ctx.font = `700 ${subSize}px ${FONT}`;
+  const sLines = sub ? wrapChars(ctx, sub, maxW, 2) : [];
+  const sLH = subSize * 1.45;
+  const gap = tLines.length && sLines.length ? size * 0.35 : 0;
+  const blockH = tLines.length * tLH + gap + sLines.length * sLH;
+
+  // 読みやすさのための半透明グラデーション帯
+  const bandH = blockH + pad * 2.4;
+  const top = position === 'bottom' ? H - bandH : 0;
+  const grad = position === 'bottom'
+    ? ctx.createLinearGradient(0, H - bandH, 0, H)
+    : ctx.createLinearGradient(0, 0, 0, bandH);
+  if (position === 'bottom') { grad.addColorStop(0, 'rgba(15,23,42,0)'); grad.addColorStop(0.35, 'rgba(15,23,42,0.55)'); grad.addColorStop(1, 'rgba(15,23,42,0.75)'); }
+  else { grad.addColorStop(0, 'rgba(15,23,42,0.75)'); grad.addColorStop(0.65, 'rgba(15,23,42,0.55)'); grad.addColorStop(1, 'rgba(15,23,42,0)'); }
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, top, W, bandH);
+
+  let y = position === 'bottom' ? H - pad - blockH : pad;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.lineJoin = 'round';
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = 'rgba(15,23,42,0.6)';
+
+  ctx.font = `900 ${size}px ${FONT}`;
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  tLines.forEach((ln) => { ctx.strokeText(ln, W / 2, y); ctx.fillText(ln, W / 2, y); y += tLH; });
+  y += gap;
+  ctx.font = `700 ${subSize}px ${FONT}`;
+  ctx.lineWidth = Math.max(2, subSize * 0.12);
+  sLines.forEach((ln) => { ctx.strokeText(ln, W / 2, y); ctx.fillText(ln, W / 2, y); y += sLH; });
+
+  return c.toDataURL('image/jpeg', 0.88);
+}
+
+function defaultSubText(ctx) {
+  const parts = [];
+  const d = parseYmd(ctx.event_date);
+  if (d) parts.push(`${d.getMonth() + 1}/${d.getDate()}（${WD[d.getDay()]}）${ctx.start_time ? ctx.start_time + '〜' : ''}`);
+  if (ctx.location) parts.push(ctx.location);
+  return parts.join('　');
+}
+
 /** AIチラシ画像生成モーダル */
 function openAiImageModal(ctx, onUse) {
   const styles = [['illust', 'イラスト'], ['photo', '写真風'], ['watercolor', '水彩画風'], ['pop', 'ポップ'], ['simple', 'シンプル']];
@@ -1205,7 +1306,7 @@ function openAiImageModal(ctx, onUse) {
   const hasCtx = ctx.title || ctx.description;
   const w = openModal({
     title: `${ic('sparkles', 'w-4 h-4 inline text-violet-600')} AIでチラシ画像を生成`,
-    size: 'max-w-2xl',
+    size: 'max-w-3xl',
     body: `<div class="grid sm:grid-cols-2 gap-5">
       <form id="aim-form" class="space-y-3">
         <div class="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
@@ -1218,11 +1319,17 @@ function openAiImageModal(ctx, onUse) {
         <div><label class="label" for="aim-aspect">サイズ</label><select id="aim-aspect" name="aspect" class="input">
           ${aspects.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
         <div><label class="label" for="aim-extra">イメージの指示（任意）</label>
-          <textarea id="aim-extra" name="extra" rows="3" maxlength="300" class="input" placeholder="例：卓球ラケットとボール、明るい体育館、笑顔の雰囲気"></textarea></div>
-        <label class="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
-          <input type="checkbox" name="with_text" class="mt-0.5 rounded border-slate-300 text-violet-600">
-          <span>イベント名の文字も画像に入れる<span class="block text-[11px] text-slate-400">日本語の文字は崩れることがあります。通常はオフがおすすめです。</span></span>
-        </label>
+          <textarea id="aim-extra" name="extra" rows="2" maxlength="300" class="input" placeholder="例：卓球台とラケット、明るい体育館、笑顔の雰囲気"></textarea></div>
+        <fieldset class="rounded-xl border border-slate-200 p-3 space-y-2">
+          <legend class="label px-1">画像に入れる文字</legend>
+          <div><label class="label" for="aim-pos">文字の位置</label><select id="aim-pos" name="text_position" class="input">
+            <option value="top">上に入れる</option><option value="bottom">下に入れる</option><option value="none">文字を入れない</option></select></div>
+          <div data-aim-textfields class="space-y-2">
+            <div><label class="label" for="aim-title">タイトル</label><input id="aim-title" name="title_text" class="input" maxlength="40" value="${esc(ctx.title)}"></div>
+            <div><label class="label" for="aim-sub">サブ文字（日時・場所など）</label><input id="aim-sub" name="sub_text" class="input" maxlength="60" value="${esc(defaultSubText(ctx))}"></div>
+          </div>
+          <p class="text-[11px] text-slate-500">文字はAIに描かせず、サイトのフォントで正確に重ねるので文字化けしません。生成後に書き換えても作り直しは不要です。</p>
+        </fieldset>
         <button type="submit" class="btn-ai w-full py-2.5">${ic('sparkles')}画像を生成する</button>
       </form>
       <div id="aim-result" class="rounded-2xl bg-slate-50 border border-slate-200 p-4 text-sm text-slate-500 flex flex-col items-center justify-center gap-2 min-h-[260px] text-center">
@@ -1232,35 +1339,58 @@ function openAiImageModal(ctx, onUse) {
   });
   const form = w.querySelector('#aim-form');
   const box = w.querySelector('#aim-result');
-  let current = null;
+  let raw = null;
+  let composed = null;
 
-  const generate = async () => {
+  const textOpts = () => ({
+    title: form.title_text.value, sub: form.sub_text.value, position: form.text_position.value,
+  });
+  const syncTextFields = () => { w.querySelector('[data-aim-textfields]').classList.toggle('hidden', form.text_position.value === 'none'); };
+  syncTextFields();
+
+  const renderResult = async () => {
+    if (!raw) return;
+    composed = await composeFlyer(raw, textOpts());
+    const imgEl = box.querySelector('[data-aim-img]');
+    if (imgEl) { imgEl.src = composed; return; }
+    box.className = 'space-y-3';
+    box.innerHTML = `<img data-aim-img src="${composed}" alt="AIが生成したチラシ画像" class="w-full h-auto rounded-xl border border-slate-200">
+      <div class="flex flex-wrap gap-2">
+        <button type="button" class="btn-primary flex-1" data-aim-use>${ic('check')}この画像を使う</button>
+        <button type="button" class="btn-secondary" data-aim-retry>${ic('refresh-cw')}絵を作り直す</button>
+      </div>
+      <p class="text-[11px] text-slate-400">AI生成画像です。内容を確認してからお使いください。</p>`;
+    icons();
+    box.querySelector('[data-aim-retry]').onclick = generate;
+    box.querySelector('[data-aim-use]').onclick = async (e) => {
+      const b = e.currentTarget;
+      setBusy(b, true, '保存中…');
+      try { await onUse(composed); closeModal(w); } catch (_) { setBusy(b, false); }
+    };
+  };
+
+  const recompose = debounce(() => { renderResult().catch((e) => toast(e.message, 'error')); }, 250);
+  form.text_position.addEventListener('change', () => { syncTextFields(); recompose(); });
+  form.title_text.addEventListener('input', recompose);
+  form.sub_text.addEventListener('input', recompose);
+
+  async function generate() {
     const fd = new FormData(form);
     const payload = Object.assign({}, ctx, {
-      style: fd.get('style'), aspect: fd.get('aspect'), extra: String(fd.get('extra') || '').trim(), with_text: fd.get('with_text') === 'on',
+      style: fd.get('style'), aspect: fd.get('aspect'), extra: String(fd.get('extra') || '').trim(),
+      text_position: fd.get('text_position'),
     });
     if (!payload.title && !payload.description && !payload.extra) { toast('イメージの指示を入力してください', 'error'); return; }
     const btn = form.querySelector('button[type=submit]');
     setBusy(btn, true, '生成中…');
+    raw = null;
     box.className = 'rounded-2xl bg-slate-50 border border-slate-200 p-4 text-sm text-slate-500 flex flex-col items-center justify-center gap-3 min-h-[260px] text-center';
     box.innerHTML = '<div class="typing"><span></span><span></span><span></span></div><p class="text-xs">AIが画像を描いています…</p>';
     try {
       const d = await api('generateFlyerImage', payload);
-      current = d.base64;
-      box.className = 'space-y-3';
-      box.innerHTML = `<img src="${current}" alt="AIが生成したチラシ画像" class="w-full h-auto rounded-xl border border-slate-200">
-        <div class="flex flex-wrap gap-2">
-          <button type="button" class="btn-primary flex-1" data-aim-use>${ic('check')}この画像を使う</button>
-          <button type="button" class="btn-secondary" data-aim-retry>${ic('refresh-cw')}作り直す</button>
-        </div>
-        <p class="text-[11px] text-slate-400">AI生成画像です。内容を確認してからお使いください。</p>`;
-      icons();
-      box.querySelector('[data-aim-retry]').onclick = generate;
-      box.querySelector('[data-aim-use]').onclick = async (e) => {
-        const b = e.currentTarget;
-        setBusy(b, true, '保存中…');
-        try { await onUse(current); closeModal(w); } catch (_) { setBusy(b, false); }
-      };
+      raw = d.base64;
+      box.innerHTML = '';
+      await renderResult();
     } catch (err) {
       box.className = 'rounded-2xl bg-rose-50 border border-rose-200 p-4 text-sm text-rose-700 flex flex-col items-center justify-center gap-2 min-h-[260px] text-center';
       box.innerHTML = `${ic('circle-alert', 'w-6 h-6')}<p class="font-bold">生成できませんでした</p><p class="text-xs leading-relaxed break-all">${esc(err.message)}</p>`;
@@ -1268,7 +1398,7 @@ function openAiImageModal(ctx, onUse) {
     } finally {
       setBusy(btn, false);
     }
-  };
+  }
   form.addEventListener('submit', (e) => { e.preventDefault(); generate(); });
 }
 

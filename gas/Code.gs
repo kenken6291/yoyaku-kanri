@@ -1754,7 +1754,13 @@ function apiGenerateFlyerImage_(u, p) {
   rateLimit_('aiimg:' + u.user_id, CONFIG.AI_IMAGE_RATE_LIMIT, 600);
   const style = FLYER_IMAGE_STYLES[p.style] || FLYER_IMAGE_STYLES.illust;
   const aspect = FLYER_IMAGE_ASPECTS.indexOf(p.aspect) >= 0 ? p.aspect : '3:4';
-  const withText = toBool_(p.with_text);
+  // 日本語の文字は画像モデルで崩れやすいため、AIには文字なしで描かせ、文字はブラウザ側で正確なフォントで重ねる
+  const textPos = p.text_position === 'bottom' ? 'bottom' : (p.text_position === 'none' ? 'none' : 'top');
+  const spaceHint = {
+    top: '画像の上部約3割は、後から文字を重ねるための空や壁などの落ち着いた余白にしてください（主要な被写体は中央〜下部に配置）。',
+    bottom: '画像の下部約3割は、後から文字を重ねるための床や地面などの落ち着いた余白にしてください（主要な被写体は上部〜中央に配置）。',
+    none: '',
+  }[textPos];
 
   const prompt = [
     '地域のイベント告知チラシに使うメインビジュアル画像を1枚作成してください。',
@@ -1766,9 +1772,8 @@ function apiGenerateFlyerImage_(u, p) {
     '画風：' + style,
     '雰囲気：明るく親しみやすく、幅広い年代が参加したくなる印象。',
     '縦横比：' + aspect,
-    withText
-      ? '画像の上部にイベント名「' + (title || '') + '」を大きく読みやすい日本語の文字で入れてください。それ以外の文字は入れないでください。'
-      : '文字・数字・ロゴ・透かしは一切入れないでください（文字は後から別途配置します）。下部に文字を載せられる落ち着いた余白を残してください。',
+    '重要：文字・数字・看板の文字・ロゴ・透かしは一切描かないでください。',
+    spaceHint,
     '実在の人物・有名人・既存のキャラクターや商標は描かないでください。',
   ].filter(Boolean).join('\n');
 
