@@ -1097,7 +1097,10 @@ function flyerUploaderHtml(v = {}, { groupOption = false } = {}) {
         ${v.flyer_url ? `<img src="${esc(v.flyer_url)}" alt="" referrerpolicy="no-referrer" class="w-full h-full object-cover">` : ic('image', 'w-8 h-8')}
       </div>
       <div class="space-y-1.5 min-w-0">
-        <label class="btn-secondary btn-sm cursor-pointer">${ic('upload', 'w-3.5 h-3.5')}画像を選ぶ<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" class="sr-only" data-flyer-input></label>
+        <div class="flex flex-wrap gap-1.5">
+          <label class="btn-secondary btn-sm cursor-pointer">${ic('upload', 'w-3.5 h-3.5')}画像を選ぶ<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" class="sr-only" data-flyer-input></label>
+          <button type="button" class="btn-ai btn-sm" data-flyer-ai>${ic('sparkles', 'w-3.5 h-3.5')}AIで生成</button>
+        </div>
         ${v.flyer_drive_id ? '<button type="button" class="btn-ghost btn-sm text-rose-600" data-flyer-clear>画像を外す</button>' : ''}
         ${groupOption ? '<label class="flex items-center gap-1.5 text-xs text-slate-600"><input type="checkbox" data-flyer-group class="rounded border-slate-300 text-indigo-600">同じ定期グループ全体に適用</label>' : ''}
         <p class="text-[11px] text-slate-500" data-flyer-status>${v.flyer_drive_id ? '登録済み' : '未登録'}</p>
@@ -1120,6 +1123,11 @@ async function prepareImage(file) {
     if (file.size > 5 * 1024 * 1024) throw new Error('GIF画像は5MB以下にしてください');
     return { dataUrl, mime: file.type };
   }
+  return toJpeg(dataUrl);
+}
+
+/** 画像を最大1600pxのJPEGに変換（アップロード容量を抑える） */
+async function toJpeg(dataUrl) {
   const img = await loadImage(dataUrl);
   const max = 1600;
   const scale = Math.min(1, max / Math.max(img.width, img.height));
@@ -1139,22 +1147,28 @@ function bindFlyerUploader(root, { eventId = '' } = {}) {
   const prev = box.querySelector('[data-flyer-preview]');
   const status = box.querySelector('[data-flyer-status]');
   const clear = box.querySelector('[data-flyer-clear]');
+  const aiBtn = box.querySelector('[data-flyer-ai]');
   if (clear) clear.addEventListener('click', () => { hidden.value = ''; prev.innerHTML = ic('image', 'w-8 h-8'); status.textContent = '保存すると画像が外れます'; clear.remove(); icons(); });
+
+  const uploadDataUrl = async (dataUrl, mime) => {
+    prev.innerHTML = `<img src="${dataUrl}" alt="" class="w-full h-full object-cover">`;
+    status.textContent = 'アップロード中…';
+    const groupCb = box.querySelector('[data-flyer-group]');
+    const payload = { base64: dataUrl, mime_type: mime };
+    if (eventId) { payload.event_id = eventId; payload.apply_to_group = !!(groupCb && groupCb.checked); }
+    const r = await api('uploadFlyer', payload);
+    hidden.value = r.file_id;
+    status.textContent = r.shared ? 'アップロード完了' : 'アップロード完了（共有設定に失敗：Driveで公開設定を確認してください）';
+    if (eventId) state.eventsLoaded = false;
+  };
+
   input.addEventListener('change', async () => {
     const file = input.files[0];
     if (!file) return;
     try {
       status.textContent = '画像を準備中…';
       const { dataUrl, mime } = await prepareImage(file);
-      prev.innerHTML = `<img src="${dataUrl}" alt="" class="w-full h-full object-cover">`;
-      status.textContent = 'アップロード中…';
-      const groupCb = box.querySelector('[data-flyer-group]');
-      const payload = { base64: dataUrl, mime_type: mime };
-      if (eventId) { payload.event_id = eventId; payload.apply_to_group = !!(groupCb && groupCb.checked); }
-      const r = await api('uploadFlyer', payload);
-      hidden.value = r.file_id;
-      status.textContent = r.shared ? 'アップロード完了' : 'アップロード完了（共有設定に失敗：Driveで公開設定を確認してください）';
-      if (eventId) state.eventsLoaded = false;
+      await uploadDataUrl(dataUrl, mime);
     } catch (e) {
       status.textContent = 'アップロードに失敗しました';
       toast(e.message, 'error');
@@ -1162,6 +1176,100 @@ function bindFlyerUploader(root, { eventId = '' } = {}) {
       input.value = '';
     }
   });
+
+  if (aiBtn) {
+    aiBtn.addEventListener('click', () => {
+      const form = box.closest('form');
+      const g = (n) => (form && form.elements[n] ? String(form.elements[n].value || '').trim() : '');
+      openAiImageModal({ title: g('title'), category: g('category'), description: g('description'), location: g('location') },
+        async (dataUrl) => {
+          try {
+            status.textContent = '画像を準備中…';
+            const j = await toJpeg(dataUrl);
+            await uploadDataUrl(j.dataUrl, j.mime);
+            toast('AI生成画像をチラシに設定しました', 'success');
+          } catch (e) {
+            status.textContent = 'アップロードに失敗しました';
+            toast(e.message, 'error');
+            throw e;
+          }
+        });
+    });
+  }
+}
+
+/** AIチラシ画像生成モーダル */
+function openAiImageModal(ctx, onUse) {
+  const styles = [['illust', 'イラスト'], ['photo', '写真風'], ['watercolor', '水彩画風'], ['pop', 'ポップ'], ['simple', 'シンプル']];
+  const aspects = [['3:4', '縦長（チラシ向け）'], ['1:1', '正方形（SNS向け）'], ['4:3', '横長'], ['9:16', 'スマホ縦長'], ['16:9', 'ワイド']];
+  const hasCtx = ctx.title || ctx.description;
+  const w = openModal({
+    title: `${ic('sparkles', 'w-4 h-4 inline text-violet-600')} AIでチラシ画像を生成`,
+    size: 'max-w-2xl',
+    body: `<div class="grid sm:grid-cols-2 gap-5">
+      <form id="aim-form" class="space-y-3">
+        <div class="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
+          ${hasCtx ? `<p class="font-bold text-slate-800 mb-0.5">${esc(ctx.title || '（イベント名未入力）')}</p><p class="line-clamp-2">${esc(ctx.description || ctx.category || '')}</p>`
+    : `${ic('info', 'w-3.5 h-3.5 inline')} 登録フォームのイベント名・案内文が空です。下の「イメージの指示」に描いてほしい内容を書いてください。`}
+        </div>
+        <div><span class="label">画風</span><div class="flex flex-wrap gap-1.5">
+          ${styles.map(([v, l], i) => `<label class="cursor-pointer"><input type="radio" name="style" value="${v}" class="peer sr-only" ${i === 0 ? 'checked' : ''}><span class="inline-flex px-3 h-8 items-center rounded-lg border border-slate-300 text-xs font-bold text-slate-700 peer-checked:bg-violet-600 peer-checked:text-white peer-checked:border-violet-600 peer-focus-visible:ring-2 peer-focus-visible:ring-violet-400">${l}</span></label>`).join('')}
+        </div></div>
+        <div><label class="label" for="aim-aspect">サイズ</label><select id="aim-aspect" name="aspect" class="input">
+          ${aspects.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
+        <div><label class="label" for="aim-extra">イメージの指示（任意）</label>
+          <textarea id="aim-extra" name="extra" rows="3" maxlength="300" class="input" placeholder="例：卓球ラケットとボール、明るい体育館、笑顔の雰囲気"></textarea></div>
+        <label class="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
+          <input type="checkbox" name="with_text" class="mt-0.5 rounded border-slate-300 text-violet-600">
+          <span>イベント名の文字も画像に入れる<span class="block text-[11px] text-slate-400">日本語の文字は崩れることがあります。通常はオフがおすすめです。</span></span>
+        </label>
+        <button type="submit" class="btn-ai w-full py-2.5">${ic('sparkles')}画像を生成する</button>
+      </form>
+      <div id="aim-result" class="rounded-2xl bg-slate-50 border border-slate-200 p-4 text-sm text-slate-500 flex flex-col items-center justify-center gap-2 min-h-[260px] text-center">
+        ${ic('image', 'w-8 h-8 text-slate-300')}<p>画風とサイズを選んで「画像を生成する」を押してください。<br>生成には20〜40秒ほどかかります。</p>
+      </div>
+    </div>`,
+  });
+  const form = w.querySelector('#aim-form');
+  const box = w.querySelector('#aim-result');
+  let current = null;
+
+  const generate = async () => {
+    const fd = new FormData(form);
+    const payload = Object.assign({}, ctx, {
+      style: fd.get('style'), aspect: fd.get('aspect'), extra: String(fd.get('extra') || '').trim(), with_text: fd.get('with_text') === 'on',
+    });
+    if (!payload.title && !payload.description && !payload.extra) { toast('イメージの指示を入力してください', 'error'); return; }
+    const btn = form.querySelector('button[type=submit]');
+    setBusy(btn, true, '生成中…');
+    box.className = 'rounded-2xl bg-slate-50 border border-slate-200 p-4 text-sm text-slate-500 flex flex-col items-center justify-center gap-3 min-h-[260px] text-center';
+    box.innerHTML = '<div class="typing"><span></span><span></span><span></span></div><p class="text-xs">AIが画像を描いています…</p>';
+    try {
+      const d = await api('generateFlyerImage', payload);
+      current = d.base64;
+      box.className = 'space-y-3';
+      box.innerHTML = `<img src="${current}" alt="AIが生成したチラシ画像" class="w-full h-auto rounded-xl border border-slate-200">
+        <div class="flex flex-wrap gap-2">
+          <button type="button" class="btn-primary flex-1" data-aim-use>${ic('check')}この画像を使う</button>
+          <button type="button" class="btn-secondary" data-aim-retry>${ic('refresh-cw')}作り直す</button>
+        </div>
+        <p class="text-[11px] text-slate-400">AI生成画像です。内容を確認してからお使いください。</p>`;
+      icons();
+      box.querySelector('[data-aim-retry]').onclick = generate;
+      box.querySelector('[data-aim-use]').onclick = async (e) => {
+        const b = e.currentTarget;
+        setBusy(b, true, '保存中…');
+        try { await onUse(current); closeModal(w); } catch (_) { setBusy(b, false); }
+      };
+    } catch (err) {
+      box.className = 'rounded-2xl bg-rose-50 border border-rose-200 p-4 text-sm text-rose-700 flex flex-col items-center justify-center gap-2 min-h-[260px] text-center';
+      box.innerHTML = `${ic('circle-alert', 'w-6 h-6')}<p class="font-bold">生成できませんでした</p><p class="text-xs leading-relaxed break-all">${esc(err.message)}</p>`;
+      icons();
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  form.addEventListener('submit', (e) => { e.preventDefault(); generate(); });
 }
 
 function collectEventFields(form) {

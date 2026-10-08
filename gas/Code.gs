@@ -7,6 +7,7 @@
  *  【スクリプトプロパティ】（プロジェクトの設定 → スクリプト プロパティ）
  *    GEMINI_API_KEY            : Gemini APIキー（必須：AI機能を使う場合）
  *    GEMINI_MODEL              : 使用モデル（setupDatabase で gemini-3.8-flash を自動設定）
+ *    GEMINI_IMAGE_MODEL        : チラシ画像生成モデル（setupDatabase で gemini-2.5-flash-image を自動設定）
  *    GEMINI_FALLBACK_MODEL     : 任意。メインのモデルが混雑(503等)のとき自動で切り替える予備モデル
  *    SPREADSHEET_ID            : スタンドアロンGASの場合は必須（コンテナバインドなら省略可）
  *    DRIVE_FOLDER_ID           : チラシ保存フォルダID（省略時 setupDatabase で自動作成）
@@ -49,6 +50,8 @@ const CONFIG = Object.freeze({
   AI_RATE_LIMIT: 20,               // 10分あたりのAI呼び出し上限（ユーザー単位）
   HASH_ITERATIONS: 300,
   DEFAULT_GEMINI_MODEL: 'gemini-3.8-flash',
+  DEFAULT_GEMINI_IMAGE_MODEL: 'gemini-2.5-flash-image',
+  AI_IMAGE_RATE_LIMIT: 10,         // 10分あたりの画像生成上限（ユーザー単位）
   DEFAULT_FOLDER_NAME: 'ReserveHub_Flyers',
   DEFAULT_CATEGORIES: ['語学・国際交流', 'スポーツ・健康', 'IT・ビジネス', 'ダンス・音楽', '料理・食', '趣味・クラフト', 'アウトドア', '地域・ボランティア', 'その他'],
 });
@@ -128,6 +131,7 @@ const ROUTES = {
   setReservationStatus: { roles: ORG, fn: apiSetReservationStatus_ },
   setPaymentStatus: { roles: ORG, fn: apiSetPaymentStatus_ },
   generateFlyerText: { roles: ORG, fn: apiGenerateFlyerText_ },
+  generateFlyerImage: { roles: ORG, fn: apiGenerateFlyerImage_ },
   uploadFlyer: { roles: ORG, fn: apiUploadFlyer_ },
 
   // 管理者
@@ -251,6 +255,10 @@ function setupDatabase() {
     Logger.log('PASSWORD_PEPPER を生成しました（変更しないでください）');
   }
 
+  if (!props.getProperty('GEMINI_IMAGE_MODEL')) {
+    props.setProperty('GEMINI_IMAGE_MODEL', CONFIG.DEFAULT_GEMINI_IMAGE_MODEL);
+    Logger.log('GEMINI_IMAGE_MODEL を ' + CONFIG.DEFAULT_GEMINI_IMAGE_MODEL + ' に設定しました');
+  }
   if (!props.getProperty('GEMINI_MODEL')) {
     props.setProperty('GEMINI_MODEL', CONFIG.DEFAULT_GEMINI_MODEL);
     Logger.log('GEMINI_MODEL を ' + CONFIG.DEFAULT_GEMINI_MODEL + ' に設定しました');
@@ -1722,6 +1730,117 @@ function apiGenerateFlyerText_(u, p) {
       category: str_(result.category, 50),
     },
   };
+}
+
+/** 主催者向け：AIチラシ画像生成（プレビュー用。保存は uploadFlyer で行う） */
+const FLYER_IMAGE_STYLES = {
+  illust: '温かみのあるフラットなイラスト',
+  photo: '自然光で撮影したような写真風（人物は後ろ姿や手元など顔が特定できない構図）',
+  watercolor: 'やわらかい水彩画風',
+  pop: 'カラフルでポップなグラフィックデザイン',
+  simple: '余白を広く取ったシンプルでモダンなデザイン',
+};
+const FLYER_IMAGE_ASPECTS = ['3:4', '1:1', '4:3', '9:16', '16:9'];
+
+function apiGenerateFlyerImage_(u, p) {
+  const title = str_(p.title, 100);
+  const category = str_(p.category, 50);
+  const description = str_(p.description, 600);
+  const location = str_(p.location, 100);
+  const extra = str_(p.extra, 300);
+  if (!title && !description && !extra) {
+    throw new AppError('VALIDATION', 'イベント名・案内文・イメージの指示のいずれかを入力してください');
+  }
+  rateLimit_('aiimg:' + u.user_id, CONFIG.AI_IMAGE_RATE_LIMIT, 600);
+  const style = FLYER_IMAGE_STYLES[p.style] || FLYER_IMAGE_STYLES.illust;
+  const aspect = FLYER_IMAGE_ASPECTS.indexOf(p.aspect) >= 0 ? p.aspect : '3:4';
+  const withText = toBool_(p.with_text);
+
+  const prompt = [
+    '地域のイベント告知チラシに使うメインビジュアル画像を1枚作成してください。',
+    'イベント名：' + (title || '（未定）'),
+    category ? 'カテゴリ：' + category : '',
+    location ? '開催場所：' + location : '',
+    description ? 'イベントの内容：' + description.replace(/\s+/g, ' ') : '',
+    extra ? '追加のイメージ指示：' + extra : '',
+    '画風：' + style,
+    '雰囲気：明るく親しみやすく、幅広い年代が参加したくなる印象。',
+    '縦横比：' + aspect,
+    withText
+      ? '画像の上部にイベント名「' + (title || '') + '」を大きく読みやすい日本語の文字で入れてください。それ以外の文字は入れないでください。'
+      : '文字・数字・ロゴ・透かしは一切入れないでください（文字は後から別途配置します）。下部に文字を載せられる落ち着いた余白を残してください。',
+    '実在の人物・有名人・既存のキャラクターや商標は描かないでください。',
+  ].filter(Boolean).join('\n');
+
+  const img = geminiImage_(prompt, aspect);
+  return { base64: 'data:' + img.mime + ';base64,' + img.data, mime_type: img.mime };
+}
+
+function geminiImage_(prompt, aspect) {
+  const key = prop_('GEMINI_API_KEY', '');
+  if (!key) throw new AppError('CONFIG', 'GEMINI_API_KEY が設定されていません（スクリプトプロパティを確認してください）');
+  const model = str_(prop_('GEMINI_IMAGE_MODEL', CONFIG.DEFAULT_GEMINI_IMAGE_MODEL), 100);
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+  let useImageConfig = true;
+  let res = null;
+  for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS; attempt++) {
+    const body = {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+    };
+    if (useImageConfig) body.generationConfig.imageConfig = { aspectRatio: aspect };
+    res = UrlFetchApp.fetch(url, {
+      method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
+      payload: JSON.stringify(body), muteHttpExceptions: true,
+    });
+    const c = res.getResponseCode();
+    if (c === 400 && useImageConfig) {
+      // 縦横比指定に未対応のモデル向けに指定なしで再試行
+      console.warn('Gemini画像 400（imageConfig付き）→指定なしで再試行: ' + res.getContentText().slice(0, 300));
+      useImageConfig = false;
+      attempt--;
+      continue;
+    }
+    if (GEMINI_RETRY_CODES.indexOf(c) === -1 || attempt === GEMINI_MAX_ATTEMPTS) break;
+    Utilities.sleep(1500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500));
+  }
+
+  const code = res.getResponseCode();
+  const text = res.getContentText();
+  if (code !== 200) {
+    console.error('Gemini image error ' + code + ' (model=' + model + '): ' + text.slice(0, 1000));
+    let apiMsg = '';
+    try { apiMsg = (JSON.parse(text).error || {}).message || ''; } catch (_) { apiMsg = ''; }
+    if ([500, 502, 503, 504].indexOf(code) >= 0) throw new AppError('AI_BUSY', 'AI画像サーバーが混雑しています（' + code + '）。1〜2分おいてからもう一度お試しください');
+    if (code === 429) throw new AppError('AI_BUSY', 'AI画像生成の利用上限に達しました。時間をおいてお試しください（無料枠では画像生成が使えない場合があります）');
+    if (code === 404) throw new AppError('AI_ERROR', '画像モデル「' + model + '」が見つかりません。スクリプトプロパティ GEMINI_IMAGE_MODEL を確認してください');
+    if (code === 403) throw new AppError('AI_ERROR', 'Gemini APIの画像生成が許可されていません（APIキーの権限・課金設定を確認してください）');
+    throw new AppError('AI_ERROR', 'AI画像生成に失敗しました（' + code + '）' + (apiMsg ? '：' + apiMsg.slice(0, 200) : ''));
+  }
+
+  const data = JSON.parse(text);
+  if (data.promptFeedback && data.promptFeedback.blockReason) {
+    throw new AppError('AI_ERROR', '入力内容がAIの安全フィルタにより処理できませんでした。表現を変えてお試しください');
+  }
+  const cand = data.candidates && data.candidates[0];
+  const parts = (cand && cand.content && cand.content.parts) || [];
+  for (let i = 0; i < parts.length; i++) {
+    const inline = parts[i].inlineData || parts[i].inline_data;
+    if (inline && inline.data) return { mime: inline.mimeType || inline.mime_type || 'image/png', data: inline.data };
+  }
+  const reason = cand && cand.finishReason ? cand.finishReason : '';
+  throw new AppError('AI_ERROR', 'AIが画像を返しませんでした' + (reason ? '（' + reason + '）' : '') + '。指示を変えてもう一度お試しください');
+}
+
+/** 【手動実行用】画像生成の接続テスト */
+function checkGeminiImage() {
+  Logger.log('GEMINI_IMAGE_MODEL: ' + prop_('GEMINI_IMAGE_MODEL', '(未設定 → ' + CONFIG.DEFAULT_GEMINI_IMAGE_MODEL + ')'));
+  try {
+    const img = geminiImage_('青空と芝生の公園を描いた、文字のないシンプルなイラスト', '1:1');
+    Logger.log('成功: ' + img.mime + ' / 約' + Math.round(img.data.length * 0.75 / 1024) + 'KB');
+  } catch (e) {
+    Logger.log('失敗: ' + e.message);
+  }
 }
 
 /** 参加者向け：空き状況コンシェルジュ */
