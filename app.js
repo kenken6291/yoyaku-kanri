@@ -7,7 +7,9 @@
 // =====================================================================
 // 定数・状態
 // =====================================================================
+const APP_VERSION = '2026.10.09-3';
 const CFG = window.APP_CONFIG || {};
+console.info('ReserveHub app.js ' + APP_VERSION);
 const TOKEN_KEY = CFG.TOKEN_STORAGE_KEY || 'reservehub_token';
 const USER_KEY = CFG.USER_STORAGE_KEY || 'reservehub_user';
 const MAX_ITEMS = 10;
@@ -311,6 +313,7 @@ function renderHeader() {
       <div class="absolute right-0 mt-2 w-48 card shadow-lg p-1 z-40">
         <button data-act="change-pw" class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-slate-100 flex items-center gap-2">${ic('key-round')}パスワード変更</button>
         <button data-act="logout" class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-slate-100 text-rose-600 flex items-center gap-2">${ic('log-out')}ログアウト</button>
+        <p class="px-3 pt-1 pb-1.5 text-[10px] text-slate-400 border-t border-slate-100 mt-1">ver ${APP_VERSION}</p>
       </div>
     </details>` : `
     <div class="flex items-center gap-2">
