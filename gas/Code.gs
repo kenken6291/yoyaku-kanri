@@ -1563,7 +1563,14 @@ function callGemini_(opt) {
   let lastErr = null;
   for (let i = 0; i < models.length; i++) {
     try {
-      return callGeminiModel_(models[i], key, opt);
+      try {
+        return callGeminiModel_(models[i], key, opt);
+      } catch (pe) {
+        // JSONが崩れていた場合は温度を下げて1回だけ再試行
+        if (!(pe instanceof AppError) || pe.code !== 'AI_PARSE') throw pe;
+        console.warn('Gemini JSON崩れ → 再試行');
+        return callGeminiModel_(models[i], key, Object.assign({}, opt, { temperature: 0.3 }));
+      }
     } catch (e) {
       lastErr = e;
       // 混雑・一時障害・モデル未提供のときだけ予備モデルへ切り替え
@@ -1633,23 +1640,68 @@ function callGeminiModel_(model, key, opt) {
   const cand = data.candidates && data.candidates[0];
   const out = cand && cand.content && cand.content.parts
     ? cand.content.parts.filter((x) => !x.thought).map((x) => x.text || '').join('') : '';
+  const reason = cand && cand.finishReason ? cand.finishReason : '';
   if (!out) {
-    const reason = cand && cand.finishReason ? cand.finishReason : '';
     if (reason === 'MAX_TOKENS') throw new AppError('AI_ERROR', 'AIの応答が長すぎて途中で止まりました。入力を短くしてもう一度お試しください');
     if (reason === 'SAFETY') throw new AppError('AI_ERROR', 'AIの安全フィルタにより回答できませんでした。表現を変えてお試しください');
     throw new AppError('AI_ERROR', 'AIから有効な応答が得られませんでした' + (reason ? '（' + reason + '）' : ''));
   }
-  return opt.json ? parseJsonLoose_(out) : out;
+  if (!opt.json) return out;
+  const parsed = parseJsonLoose_(out);
+  if (parsed) return parsed;
+  console.error('Gemini JSON解析失敗 (model=' + model + ', finish=' + reason + '): ' + out.slice(0, 2000));
+  throw new AppError('AI_PARSE', reason === 'MAX_TOKENS'
+    ? 'AIの応答が長すぎて途中で止まりました。入力を短くしてもう一度お試しください'
+    : 'AI応答の形式が崩れていました。もう一度お試しください');
 }
 
-function parseJsonLoose_(s) {
-  const t = String(s).replace(/```json|```/g, '').trim();
-  try { return JSON.parse(t); } catch (_) { /* fallthrough */ }
-  const m = t.match(/\{[\s\S]*\}/);
-  if (m) {
-    try { return JSON.parse(m[0]); } catch (_) { /* fallthrough */ }
+/**
+ * AIのJSON応答を寛容に解析する。失敗時は null。
+ * よくある崩れ：コードフェンス付き／文字列中の生の改行・タブ／末尾カンマ／途中で切れた出力
+ */
+function parseJsonLoose_(raw) {
+  const t = String(raw || '').replace(/```(?:json)?/gi, '').trim();
+  const first = t.indexOf('{');
+  const last = t.lastIndexOf('}');
+  const candidates = [t];
+  if (first >= 0 && last > first) candidates.push(t.slice(first, last + 1));
+  if (first >= 0) candidates.push(t.slice(first)); // 途中で切れた出力用
+  for (let i = 0; i < candidates.length; i++) {
+    try { return JSON.parse(candidates[i]); } catch (_) { /* next */ }
+    try { return JSON.parse(repairJson_(candidates[i])); } catch (_) { /* next */ }
   }
-  throw new AppError('AI_ERROR', 'AI応答の解析に失敗しました。もう一度お試しください');
+  return null;
+}
+
+function repairJson_(src) {
+  let out = '';
+  let inStr = false;
+  let escaped = false;
+  const stack = [];
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inStr) {
+      if (escaped) { out += ch; escaped = false; continue; }
+      if (ch === '\\') { out += ch; escaped = true; continue; }
+      if (ch === '"') { inStr = false; out += ch; continue; }
+      if (ch === '\n') { out += '\\n'; continue; }
+      if (ch === '\r') { out += '\\r'; continue; }
+      if (ch === '\t') { out += '\\t'; continue; }
+      if (ch.charCodeAt(0) < 0x20) continue;
+      out += ch;
+      continue;
+    }
+    if (ch === '"') { inStr = true; out += ch; continue; }
+    if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') stack.pop();
+    out += ch;
+  }
+  // 途中で切れていたら閉じる
+  if (escaped) out = out.slice(0, -1);
+  if (inStr) out += '"';
+  out = out.replace(/,\s*$/, '');
+  while (stack.length) out += stack.pop();
+  return out.replace(/,\s*([}\]])/g, '$1');
 }
 
 /** 【手動実行用】Gemini接続テスト：モデル名・キー・応答を実行ログに表示 */
