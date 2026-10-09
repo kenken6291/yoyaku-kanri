@@ -67,7 +67,7 @@ const SCHEMA = {
     'location', 'fee', 'capacity', 'deadline_hours_before', 'is_approval_required', 'flyer_drive_id',
     'recurring_group_id', 'status', 'created_at', 'updated_at', 'co_organizer_ids'],
   reservations: ['reservation_id', 'event_id', 'user_id', 'guest_count', 'applicant_name', 'applicant_phone',
-    'applicant_email', 'status', 'payment_status', 'applied_at', 'note', 'updated_at'],
+    'applicant_email', 'status', 'payment_status', 'applied_at', 'note', 'updated_at', 'registered_by'],
   // 主催者ごとの関係会員（メンバー名簿）
   members: ['link_id', 'organizer_id', 'user_id', 'label_name', 'note', 'created_at', 'updated_at', 'is_co_organizer'],
 };
@@ -79,7 +79,7 @@ const TEXT_COLUMNS = {
   events: ['event_id', 'organizer_id', 'title', 'description', 'category', 'event_date', 'start_time', 'end_time',
     'location', 'flyer_drive_id', 'recurring_group_id', 'status', 'created_at', 'updated_at', 'co_organizer_ids'],
   reservations: ['reservation_id', 'event_id', 'user_id', 'applicant_name', 'applicant_phone', 'applicant_email',
-    'status', 'payment_status', 'applied_at', 'note', 'updated_at'],
+    'status', 'payment_status', 'applied_at', 'note', 'updated_at', 'registered_by'],
   members: ['link_id', 'organizer_id', 'user_id', 'label_name', 'note', 'created_at', 'updated_at', 'is_co_organizer'],
 };
 
@@ -138,6 +138,7 @@ const ROUTES = {
   exportParticipantsCsv: { roles: ORG, fn: apiExportParticipantsCsv_ },
   setReservationStatus: { roles: ORG, fn: apiSetReservationStatus_ },
   setPaymentStatus: { roles: ORG, fn: apiSetPaymentStatus_ },
+  addReservationByOrganizer: { roles: ORG, fn: apiAddReservationByOrganizer_ },
   generateFlyerText: { roles: ORG, fn: apiGenerateFlyerText_ },
   generateFlyerImage: { roles: ORG, fn: apiGenerateFlyerImage_ },
   uploadFlyer: { roles: ORG, fn: apiUploadFlyer_ },
@@ -1108,6 +1109,7 @@ function publicReservation_(r) {
     applied_at: r.applied_at,
     note: r.note,
     updated_at: r.updated_at,
+    registered_by: r.registered_by || '',
   };
 }
 
@@ -1782,6 +1784,64 @@ function apiExportParticipantsCsv_(u, p) {
     mime_type: 'text/csv;charset=utf-8',
     csv: '\uFEFF' + toCsv_(rows),
   };
+}
+
+/**
+ * 主催者・システム管理者による参加者登録（電話・当日受付など代理予約）
+ *  ・受付締切後でも登録できる／定員超過は allow_over を指定したときのみ
+ *  ・メールアドレスが会員と一致すれば、その会員の「マイ予約」にも表示される
+ */
+function apiAddReservationByOrganizer_(u, p) {
+  const name = str_(p.applicant_name, 50);
+  const phone = str_(p.applicant_phone, 20);
+  const email = str_(p.applicant_email, 254).toLowerCase();
+  const guests = toInt_(p.guest_count, 1);
+  const note = str_(p.note, 500);
+  const status = p.status === 'pending' ? 'pending' : 'confirmed';
+  const allowOver = toBool_(p.allow_over);
+  if (!name) throw new AppError('VALIDATION', '代表者名を入力してください');
+  if (phone && !isPhone_(phone)) throw new AppError('VALIDATION', '電話番号の形式が正しくありません');
+  if (email && !isEmail_(email)) throw new AppError('VALIDATION', 'メールアドレスの形式が正しくありません');
+  if (guests < 1 || guests > CONFIG.MAX_GUESTS_PER_RESERVATION) {
+    throw new AppError('VALIDATION', '参加人数は1〜' + CONFIG.MAX_GUESTS_PER_RESERVATION + '名で指定してください');
+  }
+
+  const res = withLock_(() => {
+    const ev = loadOwnedEvent_(u, p.event_id);
+    if (ev.status === 'cancelled') throw new AppError('VALIDATION', '中止したイベントには登録できません');
+    const avail = computeAvailability_(ev, reservationIndex_());
+    const free = avail.capacity - avail.confirmed - avail.pending;
+    if (!allowOver && guests > free) {
+      throw new AppError('CAPACITY', '残席が不足しています（残り' + Math.max(0, free) + '名）。定員を超えて登録する場合は「定員を超えても登録する」にチェックしてください');
+    }
+    const member = email ? DB.find(SHEET.USERS, 'email', email) : null;
+    const userId = member && member.status !== 'suspended' ? member.user_id : '';
+    if (userId) {
+      const dup = DB.all(SHEET.RESERVATIONS).some((r) => r.event_id === ev.event_id && r.user_id === userId &&
+        (r.status === 'pending' || r.status === 'confirmed'));
+      if (dup) throw new AppError('DUPLICATE', 'この会員はすでにこのイベントを予約しています');
+    }
+    const now = nowStr_();
+    const fee = toInt_(ev.fee, 0);
+    const r = {
+      reservation_id: genId_('R'), event_id: ev.event_id, user_id: userId, guest_count: guests,
+      applicant_name: name, applicant_phone: phone, applicant_email: email,
+      status: status,
+      payment_status: fee > 0 ? (p.payment_status === 'paid' ? 'paid' : 'unpaid') : 'paid',
+      applied_at: now, note: note, updated_at: now, registered_by: u.user_id,
+    };
+    DB.insert(SHEET.RESERVATIONS, r);
+    return { r: r, ev: ev, linked: !!userId };
+  });
+
+  let mailSent = false;
+  if (res.r.applicant_email && toBool_(p.notify)) {
+    mailSent = sendMail_(res.r.applicant_email, '【' + CONFIG.APP_NAME + '】' + (res.r.status === 'pending' ? '参加申込を登録しました（承認待ち）' : '参加予約を登録しました'),
+      res.r.applicant_name + ' 様\n\n主催者が以下のイベントの参加予約を登録しました。\n\n' + eventInfoText_(res.ev) +
+      '\n■ 参加人数：' + res.r.guest_count + '名\n■ 予約番号：' + res.r.reservation_id +
+      (res.linked ? '\n\nログインすると「マイ予約」から内容を確認できます。' : '') + footer_());
+  }
+  return { reservation: publicReservation_(res.r), linked_member: res.linked, mail_sent: mailSent };
 }
 
 function apiSetReservationStatus_(u, p) {

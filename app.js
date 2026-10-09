@@ -7,7 +7,7 @@
 // =====================================================================
 // 定数・状態
 // =====================================================================
-const APP_VERSION = '2026.10.09-5';
+const APP_VERSION = '2026.10.09-6';
 const CFG = window.APP_CONFIG || {};
 console.info('ReserveHub app.js ' + APP_VERSION);
 const TOKEN_KEY = CFG.TOKEN_STORAGE_KEY || 'reservehub_token';
@@ -1845,7 +1845,7 @@ function renderParticipants(w) {
   const row = (p) => {
     if (!canManage) {
       return `<tr class="border-t border-slate-100 align-top ${p.status === 'cancelled' || p.status === 'rejected' ? 'opacity-50' : ''}">
-        <td class="py-2.5 pr-3"><p class="font-bold text-slate-900">${esc(p.applicant_name)}</p><p class="text-[11px] text-slate-400">${esc(p.applied_at.slice(5, 16))} 申込</p>${p.note ? `<p class="text-[11px] text-slate-500 mt-0.5 max-w-[16rem] break-words">${esc(p.note)}</p>` : ''}</td>
+        <td class="py-2.5 pr-3"><p class="font-bold text-slate-900">${esc(p.applicant_name)}${p.registered_by ? ' <span class="pill bg-violet-50 text-violet-700">主催者登録</span>' : ''}</p><p class="text-[11px] text-slate-400">${esc(p.applied_at.slice(5, 16))} 申込</p>${p.note ? `<p class="text-[11px] text-slate-500 mt-0.5 max-w-[16rem] break-words">${esc(p.note)}</p>` : ''}</td>
         <td class="py-2.5 pr-3 text-center font-black">${p.guest_count}<span class="text-[11px] font-normal text-slate-400">名</span></td>
         <td class="py-2.5 pr-3 text-xs"><a href="tel:${esc(p.applicant_phone)}" class="block text-slate-700">${esc(p.applicant_phone)}</a><a href="mailto:${esc(p.applicant_email)}" class="block text-slate-500 break-all">${esc(p.applicant_email)}</a></td>
         <td class="py-2.5 pr-3"><span class="pill ${RESV_STYLE[p.status] || ''}">${esc(p.status_label)}</span></td>
@@ -1862,7 +1862,7 @@ function renderParticipants(w) {
           <span class="w-4 h-4 rounded-full inline-flex items-center justify-center ${p.payment_status === 'paid' ? 'bg-emerald-500 text-white' : 'bg-white border border-slate-300'}">${p.payment_status === 'paid' ? ic('check', 'w-3 h-3') : ''}</span>${esc(p.payment_label)}</button>`
       : '<span class="text-xs text-slate-300">—</span>';
     return `<tr class="border-t border-slate-100 align-top ${p.status === 'cancelled' || p.status === 'rejected' ? 'opacity-50' : ''}">
-      <td class="py-2.5 pr-3"><p class="font-bold text-slate-900">${esc(p.applicant_name)}</p><p class="text-[11px] text-slate-400">${esc(p.applied_at.slice(5, 16))} 申込</p>${p.note ? `<p class="text-[11px] text-slate-500 mt-0.5 max-w-[16rem] break-words">${esc(p.note)}</p>` : ''}</td>
+      <td class="py-2.5 pr-3"><p class="font-bold text-slate-900">${esc(p.applicant_name)}${p.registered_by ? ' <span class="pill bg-violet-50 text-violet-700">主催者登録</span>' : ''}</p><p class="text-[11px] text-slate-400">${esc(p.applied_at.slice(5, 16))} 申込</p>${p.note ? `<p class="text-[11px] text-slate-500 mt-0.5 max-w-[16rem] break-words">${esc(p.note)}</p>` : ''}</td>
       <td class="py-2.5 pr-3 text-center font-black">${p.guest_count}<span class="text-[11px] font-normal text-slate-400">名</span></td>
       <td class="py-2.5 pr-3 text-xs"><a href="tel:${esc(p.applicant_phone)}" class="block text-slate-700 hover:text-indigo-600">${esc(p.applicant_phone)}</a><a href="mailto:${esc(p.applicant_email)}" class="block text-slate-500 hover:text-indigo-600 break-all">${esc(p.applicant_email)}</a></td>
       <td class="py-2.5 pr-3"><span class="pill ${RESV_STYLE[p.status] || ''}">${esc(p.status_label)}</span></td>
@@ -1878,6 +1878,7 @@ function renderParticipants(w) {
         ${canManage ? '' : `<p class="text-[11px] text-sky-700 mt-1">${ic('eye', 'w-3 h-3 inline')} 共同主催者として確認中です（承認・精算などの操作はこのイベントの主催者が行います）</p>`}
       </div>
       <div class="flex gap-2 shrink-0">
+        ${canManage && ev.status !== 'cancelled' ? `<button data-pact="add" class="btn-primary btn-sm">${ic('user-plus', 'w-3.5 h-3.5')}参加者を追加</button>` : ''}
         <button data-pact="csv" class="btn-secondary btn-sm">${ic('download', 'w-3.5 h-3.5')}CSV出力</button>
         <button data-pact="print" class="btn-secondary btn-sm">${ic('printer', 'w-3.5 h-3.5')}印刷</button>
       </div>
@@ -1892,8 +1893,66 @@ function renderParticipants(w) {
     ${list.length ? `<div class="overflow-x-auto -mx-5 px-5"><table class="w-full min-w-[680px] text-sm">
       <thead><tr class="text-left text-[11px] text-slate-500"><th class="pb-2 font-bold">代表者</th><th class="pb-2 font-bold text-center">人数</th><th class="pb-2 font-bold">連絡先</th><th class="pb-2 font-bold">状態</th><th class="pb-2 font-bold">精算</th><th class="pb-2"></th></tr></thead>
       <tbody>${list.map(row).join('')}</tbody></table></div>`
-    : emptyState('users', 'まだ申込はありません', '予約が入るとここに表示されます。')}`;
+    : emptyState('users', 'まだ申込はありません', canManage ? '電話や当日受付の参加者は「参加者を追加」から登録できます。' : '予約が入るとここに表示されます。')}`;
   icons();
+}
+
+/** 主催者・管理者による参加者登録（電話・当日受付・自分の参加など） */
+function openAddParticipant(parent) {
+  const { event: ev } = parent._data;
+  const a = ev.availability;
+  const free = Math.max(0, a.capacity - a.confirmed - a.pending);
+  const u = state.user;
+  const w = openModal({
+    title: '参加者を追加',
+    size: 'max-w-lg',
+    body: `<div class="rounded-xl bg-slate-50 p-3 mb-4 text-xs text-slate-600">
+        <p class="font-bold text-slate-900 text-sm">${esc(ev.title)}</p>
+        <p>${esc(dateLabel(ev))}〜${esc(ev.end_time)}　残り ${free}席 / 定員 ${a.capacity}名</p>
+      </div>
+      <form id="ap-form" class="space-y-3" novalidate>
+        <button type="button" data-ap-self class="btn-secondary btn-sm">${ic('user')}自分の名前を入れる</button>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div><label class="label" for="ap-name">代表者名</label><input id="ap-name" name="applicant_name" class="input" required maxlength="50"></div>
+          <div><label class="label" for="ap-count">参加人数（代表者を含む）</label><input id="ap-count" name="guest_count" type="number" min="1" max="${MAX_GUESTS}" value="1" class="input"></div>
+          <div><label class="label" for="ap-phone">電話番号（任意）</label><input id="ap-phone" name="applicant_phone" type="tel" class="input" placeholder="090-1234-5678"></div>
+          <div><label class="label" for="ap-email">メール（任意）</label><input id="ap-email" name="applicant_email" type="email" class="input"></div>
+        </div>
+        <p class="text-[11px] text-slate-500 -mt-1">メールが会員のものと一致すると、その人の「マイ予約」にも表示されます。</p>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div><label class="label" for="ap-status">予約の状態</label><select id="ap-status" name="status" class="input"><option value="confirmed">確定</option><option value="pending">承認待ち</option></select></div>
+          ${ev.fee > 0 ? `<div><label class="label" for="ap-pay">精算</label><select id="ap-pay" name="payment_status" class="input"><option value="unpaid">未精算</option><option value="paid">精算済（受け取り済み）</option></select></div>` : ''}
+        </div>
+        <div><label class="label" for="ap-note">備考（任意）</label><textarea id="ap-note" name="note" rows="2" maxlength="500" class="input" placeholder="例：電話受付、当日参加"></textarea></div>
+        <label class="flex items-center gap-2 text-sm text-slate-700 cursor-pointer"><input type="checkbox" name="notify" class="rounded border-slate-300 text-indigo-600">登録したことを本人にメールで知らせる（メール入力時）</label>
+        <label class="flex items-center gap-2 text-sm text-slate-700 cursor-pointer"><input type="checkbox" name="allow_over" class="rounded border-slate-300 text-rose-600">定員を超えても登録する</label>
+      </form>`,
+    footer: `<button class="btn-secondary" data-ap-close>閉じる</button><button class="btn-primary" data-ap-save>${ic('check')}登録する</button>`,
+  });
+  const f = w.querySelector('#ap-form');
+  w.querySelector('[data-ap-self]').onclick = () => {
+    f.applicant_name.value = u.name || ''; f.applicant_phone.value = u.phone || ''; f.applicant_email.value = u.email || '';
+  };
+  w.querySelector('[data-ap-close]').onclick = () => closeModal(w);
+  w.querySelector('[data-ap-save]').onclick = async (e) => {
+    const d = Object.fromEntries(new FormData(f));
+    d.event_id = ev.event_id;
+    d.guest_count = Number(d.guest_count);
+    d.notify = !!f.notify.checked;
+    d.allow_over = !!f.allow_over.checked;
+    if (!d.applicant_name.trim()) { toast('代表者名を入力してください', 'error'); return; }
+    if (!(d.guest_count >= 1 && d.guest_count <= MAX_GUESTS)) { toast(`参加人数は1〜${MAX_GUESTS}名で入力してください`, 'error'); return; }
+    const btn = e.currentTarget;
+    setBusy(btn, true, '登録中…');
+    const r = await run(() => api('addReservationByOrganizer', d));
+    setBusy(btn, false);
+    if (!r) return;
+    closeModal(w);
+    toast(`${r.reservation.applicant_name} さん（${r.reservation.guest_count}名）を登録しました${r.linked_member ? '（会員のマイ予約にも表示）' : ''}${r.mail_sent ? '・メール送信済み' : ''}`, 'success');
+    parent._dirty = true;
+    state.eventsLoaded = false;
+    await loadParticipants(parent);
+  };
 }
 
 function miniStat(label, value, cls = '') {
@@ -1907,6 +1966,7 @@ async function onParticipantAction(e, w) {
   const id = b.dataset.id;
   if (act === 'toggle-cancelled') { w._showCancelled = b.checked; renderParticipants(w); return; }
   if (act === 'csv') { exportCsv(w._eventId); return; }
+  if (act === 'add') { openAddParticipant(w); return; }
   if (act === 'print') { printRoster(w._data); return; }
   if (act === 'pay') {
     const d = await run(() => api('setPaymentStatus', { reservation_id: id, payment_status: b.dataset.next }, { }));
