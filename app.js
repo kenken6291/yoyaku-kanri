@@ -7,7 +7,7 @@
 // =====================================================================
 // 定数・状態
 // =====================================================================
-const APP_VERSION = '2026.10.09-6';
+const APP_VERSION = '2026.10.09-7';
 const CFG = window.APP_CONFIG || {};
 console.info('ReserveHub app.js ' + APP_VERSION);
 const TOKEN_KEY = CFG.TOKEN_STORAGE_KEY || 'reservehub_token';
@@ -2072,9 +2072,31 @@ async function renderMemberListTab(root) {
       ${isAdmin() ? `<div class="seg"><button data-act="mem-scope" data-scope="mine" class="seg-btn ${!scopeAll ? 'is-active' : ''}">自分の名簿</button><button data-act="mem-scope" data-scope="all" class="seg-btn ${scopeAll ? 'is-active' : ''}">全員の名簿</button></div>` : ''}
       <button data-act="mem-add" class="btn-primary">${ic('user-plus')}メンバーを追加</button>
     </section>
+    <div id="mb-coof"></div>
+    <h2 class="font-black text-slate-900 mb-2 flex items-center gap-2">${ic('contact', 'w-5 h-5 text-indigo-600')}${scopeAll ? '全員のメンバー名簿' : 'あなたのメンバー名簿'}</h2>
     <div id="mb-list">${skeletonCards(1)}</div>`;
   icons();
   let members = [];
+  const drawCoOf = (list) => {
+    const box = $('#mb-coof');
+    if (!box) return;
+    if (!list || !list.length) { box.innerHTML = ''; return; }
+    box.innerHTML = `<section class="mb-5">
+      <h2 class="font-black text-slate-900 mb-1 flex items-center gap-2">${ic('handshake', 'w-5 h-5 text-emerald-600')}あなたが共同主催者になっている主催者</h2>
+      <p class="text-xs text-slate-500 mb-2">これらの主催者のイベントは、主催者画面で確認できます。</p>
+      <div class="grid sm:grid-cols-2 gap-2">${list.map((o) => `
+        <div class="card p-3 flex items-center gap-3 border-emerald-200">
+          <span class="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 font-black inline-flex items-center justify-center shrink-0">${esc((o.name || '?').slice(0, 1))}</span>
+          <div class="min-w-0 flex-1">
+            <p class="font-bold text-slate-900 truncate">${esc(o.name)} <span class="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 align-middle">主催者</span>${o.status === 'suspended' ? ' <span class="pill bg-rose-50 text-rose-600">利用停止中</span>' : ''}</p>
+            <p class="text-xs text-slate-500 break-all">${o.email ? `<a href="mailto:${esc(o.email)}" class="hover:text-indigo-600">${esc(o.email)}</a>` : ''}${o.phone ? `　<a href="tel:${esc(o.phone)}" class="hover:text-indigo-600">${esc(o.phone)}</a>` : ''}</p>
+            ${o.since ? `<p class="text-[11px] text-slate-400">${esc(slashDate(o.since))} から共同主催者</p>` : ''}
+          </div>
+          <a href="#/organizer" class="btn-secondary btn-sm shrink-0">${ic('layout-dashboard', 'w-3.5 h-3.5')}イベントを見る</a>
+        </div>`).join('')}</div>
+    </section>`;
+    icons();
+  };
   const draw = () => {
     const kw = $('#mb-kw').value.trim().toLowerCase();
     const list = members.filter((m) => !kw || [m.name, m.label_name, m.email, m.organizer_name].join(' ').toLowerCase().includes(kw));
@@ -2098,7 +2120,12 @@ async function renderMemberListTab(root) {
     icons();
   };
   const load = async () => {
-    try { members = (await api('listMembers', { scope: scopeAll ? 'all' : 'mine' })).members || []; draw(); } catch (e) { $('#mb-list').innerHTML = emptyState('circle-alert', '読み込めませんでした', e.message); icons(); }
+    try {
+      const d = await api('listMembers', { scope: scopeAll ? 'all' : 'mine' });
+      members = d.members || [];
+      drawCoOf(d.co_organizer_of);
+      draw();
+    } catch (e) { $('#mb-list').innerHTML = emptyState('circle-alert', '読み込めませんでした', e.message); icons(); }
   };
   window._membersReload = load;
   $('#mb-kw').addEventListener('input', debounce(draw, 200));

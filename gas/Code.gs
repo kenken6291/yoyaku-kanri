@@ -843,7 +843,19 @@ function apiListMembers_(u, p) {
     .filter((m) => scopeAll || String(m.organizer_id) === ownerId)
     .map((m) => memberView_(m, users, names))
     .sort((a, b) => String(a.label_name || a.name).localeCompare(String(b.label_name || b.name), 'ja'));
-  return { members: list, scope: scopeAll ? 'all' : 'mine' };
+  // 自分を「共同主催者」に登録している主催者（名簿の持ち主）
+  const coOrganizerOf = DB.all(SHEET.MEMBERS)
+    .filter((m) => String(m.user_id) === String(u.user_id) && toBool_(m.is_co_organizer))
+    .map((m) => {
+      const o = users[String(m.organizer_id)] || {};
+      return {
+        link_id: m.link_id, organizer_id: m.organizer_id, name: o.name || '（退会済み）', email: o.email || '', phone: o.phone || '',
+        status: o.status || 'deleted', since: String(m.created_at || '').slice(0, 10),
+      };
+    })
+    .filter((x) => x.status !== 'deleted')
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+  return { members: list, scope: scopeAll ? 'all' : 'mine', co_organizer_of: coOrganizerOf };
 }
 
 /** メンバー追加：登録済みの会員ならつなぐだけ、未登録なら会員アカウントを発行して仮パスワードを送る */
