@@ -7,7 +7,7 @@
 // =====================================================================
 // 定数・状態
 // =====================================================================
-const APP_VERSION = '2026.10.09-3';
+const APP_VERSION = '2026.10.09-4';
 const CFG = window.APP_CONFIG || {};
 console.info('ReserveHub app.js ' + APP_VERSION);
 const TOKEN_KEY = CFG.TOKEN_STORAGE_KEY || 'reservehub_token';
@@ -15,7 +15,7 @@ const USER_KEY = CFG.USER_STORAGE_KEY || 'reservehub_user';
 const MAX_ITEMS = 10;
 const MAX_GUESTS = 20;
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
-const ROLE_LABEL = { admin: 'システム管理者', organizer: '主催者', user: '参加者' };
+const ROLE_LABEL = { admin: 'システム管理者', organizer: '会員', user: '会員' };
 const RESV_STYLE = {
   pending: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
   confirmed: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
@@ -162,7 +162,8 @@ function clearSession() {
   store.del(TOKEN_KEY); store.del(USER_KEY);
 }
 const role = () => (state.user ? state.user.role : '');
-const isOrg = () => role() === 'organizer' || role() === 'admin';
+// 会員は全員、イベントの主催も参加もできる
+const isOrg = () => !!state.user;
 const isAdmin = () => role() === 'admin';
 
 // =====================================================================
@@ -263,7 +264,7 @@ function setBusy(btn, busy, text) {
 // =====================================================================
 // ルーティング
 // =====================================================================
-const VIEWS = { events: renderEventsView, my: renderMyView, organizer: renderOrganizerView, admin: renderAdminView };
+const VIEWS = { events: renderEventsView, my: renderMyView, organizer: renderOrganizerView, members: renderMembersView };
 
 function currentRoute() { return (location.hash.replace(/^#\/?/, '') || 'events').split('?')[0]; }
 function go(r) { if (currentRoute() === r) route(); else location.hash = '#/' + r; }
@@ -272,8 +273,8 @@ function route() {
   let r = currentRoute();
   if (!VIEWS[r]) r = 'events';
   if (r === 'my' && !state.user) { r = 'events'; setTimeout(() => openAuthModal('login'), 0); }
-  if (r === 'organizer' && !isOrg()) r = 'events';
-  if (r === 'admin' && !isAdmin()) r = 'events';
+  if (r === 'admin') r = 'members';
+  if ((r === 'organizer' || r === 'members') && !state.user) { r = 'events'; setTimeout(() => openAuthModal('login'), 0); }
   state.route = r;
   renderHeader();
   VIEWS[r]();
@@ -288,17 +289,15 @@ function renderHeader() {
   const u = state.user;
   const r = state.route;
   const navLink = (to, label, icon) => `<a href="#/${to}" class="seg-btn ${r === to ? 'is-active' : ''}">${ic(icon, 'w-3.5 h-3.5')}${label}</a>`;
-  const roleBadge = isAdmin() ? '管理者' : (role() === 'organizer' ? '主催者ポータル' : '');
+  const roleBadge = isAdmin() ? '管理者' : '';
   let nav = '';
-  if (isOrg()) {
+  if (u) {
     nav = `<nav class="seg" aria-label="画面切り替え">
-      ${navLink('organizer', '主催者画面', 'layout-dashboard')}
-      ${navLink('events', '参加者視点', 'user')}
+      ${navLink('events', 'イベント', 'calendar-days')}
       ${navLink('my', 'マイ予約', 'ticket')}
-      ${isAdmin() ? navLink('admin', '会員管理', 'shield') : ''}
+      ${navLink('organizer', '主催者画面', 'layout-dashboard')}
+      ${navLink('members', '会員管理', 'users')}
     </nav>`;
-  } else if (u) {
-    nav = `<nav class="seg" aria-label="画面切り替え">${navLink('events', 'イベント', 'calendar-days')}${navLink('my', 'マイ予約', 'ticket')}</nav>`;
   }
   const right = u ? `
     <details class="relative">
@@ -323,7 +322,7 @@ function renderHeader() {
 
   $('#app-header').innerHTML = `
     <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
-      <a href="#/${isOrg() ? 'organizer' : 'events'}" class="flex items-center gap-2.5 shrink-0">
+      <a href="#/${isAdmin() ? 'organizer' : 'events'}" class="flex items-center gap-2.5 shrink-0">
         <span class="w-9 h-9 rounded-xl bg-indigo-600 text-white inline-flex items-center justify-center">${ic('calendar-check', 'w-5 h-5')}</span>
         <span class="leading-tight">
           <span class="flex items-center gap-1.5"><span class="font-black text-slate-900 tracking-tight">${esc(CFG.APP_NAME || 'ReserveHub')}</span>
@@ -857,7 +856,7 @@ function openAuthModal(tab = 'login') {
           if (d.must_change_password) { openPasswordModal(true); renderHeader(); return; }
           toast(`${d.user.name}さん、ようこそ`, 'success');
           state.eventsLoaded = false;
-          go(isOrg() ? 'organizer' : 'events');
+          go(isAdmin() ? 'organizer' : 'events');
         } else if (t === 'register') {
           const d = await api('register', data, { noAuthHandle: true });
           toast(d.message, 'success');
@@ -916,7 +915,7 @@ function openPasswordModal(force) {
       state.forceModalOpen = false;
       closeModal(w);
       toast('パスワードを変更しました', 'success');
-      go(isOrg() ? 'organizer' : currentRoute());
+      go(isAdmin() ? 'organizer' : currentRoute());
     } catch (err) {
       toast(err.message, 'error');
       setBusy(btn, false);
@@ -1045,12 +1044,19 @@ function renderOrganizerBody() {
   icons();
 }
 
+function organizerNames(ev) {
+  return [ev.organizer_name].concat(ev.co_organizer_names || []).filter(Boolean);
+}
+
 function organizerCard(ev) {
-  const showOrg = state.dashScope === 'all' && ev.organizer_name;
+  const names = organizerNames(ev);
+  const roleBadge = ev.my_role === 'co'
+    ? '<span class="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">共同主催</span>'
+    : ev.my_role === 'owner' ? '<span class="pill bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200">登録者</span>' : '<span class="pill bg-slate-100 text-slate-600">管理者として表示</span>';
   return `<article class="card overflow-hidden flex flex-col">
     ${flyerHeader(ev, { organizer: true })}
     <div class="p-4 flex flex-col gap-3 flex-1">
-      ${showOrg ? `<p class="text-[11px] text-slate-500">主催：${esc(ev.organizer_name)}</p>` : ''}
+      <div class="flex items-center gap-2 text-[11px] text-slate-500 min-w-0">${roleBadge}<span class="truncate">主催：${esc(names.join('・'))}</span></div>
       ${metaGrid(ev)}
       ${availBox(ev.availability)}
       ${ev.fee > 0 && (ev.unpaid_count || ev.paid_count) ? `<p class="text-[11px] text-slate-500">精算：未 ${ev.unpaid_count}件 / 済 ${ev.paid_count}件</p>` : ''}
@@ -1438,31 +1444,83 @@ function validateEventClient(d, withDate = true) {
   return '';
 }
 
+// ---------------------------------------------------------------------
+// 共同主催者の選択
+// ---------------------------------------------------------------------
+function coPickerHtml() {
+  return `<div class="rounded-xl border border-slate-200 p-3" data-co-box>
+    <p class="label flex items-center gap-1">${ic('users', 'w-3.5 h-3.5')}共同主催者（任意）</p>
+    <div data-co-list class="text-xs text-slate-500">読み込み中…</div>
+  </div>`;
+}
+
+/** 共同主催者ピッカーを有効化。box._get() で選択IDの配列（変更不可なら undefined）を返す */
+async function bindCoPicker(root, { selected = [], editable = true, ownerId = '', names = [] } = {}) {
+  const box = root.querySelector('[data-co-box]');
+  if (!box) return;
+  const list = box.querySelector('[data-co-list]');
+  box._get = () => (editable ? $$('input[data-co]:checked', box).map((c) => c.value) : undefined);
+  if (!editable) {
+    list.innerHTML = `${names.length ? `<div class="flex flex-wrap gap-1.5 mb-1">${names.map((n) => `<span class="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">${ic('user', 'w-3 h-3')}${esc(n)}</span>`).join('')}</div>` : '<p>なし</p>'}
+      <p class="text-[11px] text-slate-400">共同主催者の変更は、イベントの登録者またはシステム管理者のみ行えます。</p>`;
+    icons();
+    return;
+  }
+  let cands = [];
+  try {
+    cands = (await api('listCoOrganizerCandidates', { organizer_id: ownerId })).candidates || [];
+  } catch (e) { list.textContent = e.message; return; }
+  if (!box.isConnected) return;
+  if (!cands.length) {
+    list.innerHTML = `<p>メンバー名簿に会員がいません。一緒に主催する人を <button type="button" data-act="go-members" class="text-indigo-600 font-bold underline">会員管理</button> でメンバーに追加すると、ここで選べます。</p>`;
+    return;
+  }
+  list.innerHTML = `<div class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">${cands.map((c) => `<label class="cursor-pointer" title="${esc(c.email)}">
+      <input type="checkbox" data-co value="${esc(c.user_id)}" class="peer sr-only" ${selected.includes(c.user_id) ? 'checked' : ''}>
+      <span class="inline-flex items-center gap-1 px-2.5 h-8 rounded-full border border-slate-300 text-xs font-bold text-slate-700 peer-checked:bg-emerald-600 peer-checked:text-white peer-checked:border-emerald-600 peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-400">${ic('user', 'w-3 h-3')}${esc(c.name)}</span></label>`).join('')}</div>
+    <p class="text-[11px] text-slate-500 mt-1.5">選んだ会員もこのイベントを主催者画面で管理できます（編集・参加者名簿・承認・精算）。中止・削除と共同主催者の変更は登録者のみです。</p>`;
+  icons();
+}
+
 function openEventForm(ev = null, prefill = {}) {
   const editing = !!ev;
+  const owner = !editing || ev.is_owner !== false;
   const v = Object.assign({}, ev || {}, prefill);
   if (!editing && !v.event_date) v.event_date = '';
   const w = openModal({
     title: editing ? 'イベント枠の編集' : 'イベント枠の新規登録',
     size: 'max-w-2xl',
     body: `<form id="ev-form" class="space-y-3" novalidate>
+      ${editing && !owner ? `<p class="text-xs text-emerald-700 bg-emerald-50 rounded-lg p-2.5">${ic('users', 'w-3.5 h-3.5 inline')} 共同主催者として編集しています（登録者：${esc(ev.organizer_name)}）。</p>` : ''}
       ${eventFieldsHtml(v, { withDate: true, withStatus: editing })}
       ${flyerUploaderHtml(v, { groupOption: editing && !!ev.recurring_group_id })}
+      ${coPickerHtml()}
       ${!editing && state.dash && state.dash.quota.max ? `<p class="text-xs text-slate-500">${ic('layers', 'w-3.5 h-3.5 inline')} 現在 ${state.dash.quota.used} / ${state.dash.quota.max} 枠使用中。登録すると1枠使用します。</p>` : ''}
-      ${editing && ev.recurring_group_id ? '<p class="text-xs text-slate-500">この枠は定期開催グループの1回分です。ここでの変更はこの日だけに反映されます。</p>' : ''}
+      ${editing && ev.recurring_group_id ? '<p class="text-xs text-slate-500">この枠は定期開催グループの1回分です。内容の変更はこの日だけに反映され、共同主催者の変更は今後の全回に反映されます。</p>' : ''}
     </form>`,
-    footer: `${editing ? `<button class="btn-ghost text-rose-600 mr-auto" data-ev-cancel>${ic('ban')}イベントを中止</button>` : ''}
+    footer: `${editing && owner ? `<div class="mr-auto flex gap-1">
+        <button class="btn-ghost text-rose-600" data-ev-cancel>${ic('ban')}中止</button>
+        <button class="btn-ghost text-slate-500" data-ev-delete>${ic('trash-2')}削除</button></div>` : ''}
       <button class="btn-secondary" data-close-btn>閉じる</button>
       <button class="btn-primary" data-ev-save>${ic('check')}${editing ? '変更を保存' : '登録する'}</button>`,
   });
   const form = w.querySelector('#ev-form');
   bindFlyerUploader(w, { eventId: editing ? ev.event_id : '' });
+  bindCoPicker(w, {
+    selected: (ev && ev.co_organizer_ids) || [],
+    editable: owner,
+    ownerId: editing ? ev.organizer_id : (state.user && state.user.user_id),
+    names: (ev && ev.co_organizer_names) || [],
+  });
   w.querySelector('[data-close-btn]').onclick = () => closeModal(w);
   w.querySelector('[data-ev-save]').onclick = async (e) => {
     const d = collectEventFields(form);
     const msg = validateEventClient(d);
     if (msg) { toast(msg, 'error'); return; }
     if (d.event_date < todayStr() || d.event_date > maxStr()) { toast(`開催日は ${todayStr()} 〜 ${maxStr()} の範囲で選んでください`, 'error'); return; }
+    const coBox = w.querySelector('[data-co-box]');
+    const co = coBox && coBox._get ? coBox._get() : undefined;
+    if (co !== undefined) d.co_organizer_ids = co;
     const btn = e.currentTarget;
     setBusy(btn, true, '保存中…');
     const r = await run(() => (editing ? api('updateEvent', { event_id: ev.event_id, event: d }) : api('createEvent', { event: d })));
@@ -1474,6 +1532,8 @@ function openEventForm(ev = null, prefill = {}) {
   };
   const cancelBtn = w.querySelector('[data-ev-cancel]');
   if (cancelBtn) cancelBtn.onclick = () => cancelEventFlow(ev, w);
+  const delBtn = w.querySelector('[data-ev-delete]');
+  if (delBtn) delBtn.onclick = () => deleteEventFlow(ev, w);
 }
 
 async function cancelEventFlow(ev, parentModal) {
@@ -1493,6 +1553,25 @@ async function cancelEventFlow(ev, parentModal) {
   if (!d) return;
   if (parentModal) closeModal(parentModal);
   toast(`${d.cancelled_events}件のイベントを中止しました（予約${d.cancelled_reservations}件に通知）`, 'success');
+  refreshOrganizer();
+}
+
+async function deleteEventFlow(ev, parentModal) {
+  const ok = await confirmDialog({
+    title: 'イベントの削除',
+    message: `「${ev.title}」（${dateLabel(ev)}）を削除します。元に戻せません。\n申込中・確定の予約がある場合は削除できないので、先に「中止」を行ってください。`,
+    okLabel: 'この日を削除する', danger: true,
+  });
+  if (!ok) return;
+  let scope = 'single';
+  if (ev.recurring_group_id) {
+    const g = await confirmDialog({ title: '定期開催グループ', message: '同じ定期開催の、今後のすべての回も削除しますか？\n「この日だけ」にする場合は「やめる」を押してください。', okLabel: '今後の全回を削除', danger: true });
+    if (g) scope = 'group';
+  }
+  const d = await run(() => api('deleteEvent', { event_id: ev.event_id, scope }));
+  if (!d) return;
+  if (parentModal) closeModal(parentModal);
+  toast(`${d.deleted_events}件のイベントを削除しました`, 'success');
   refreshOrganizer();
 }
 
@@ -1517,6 +1596,7 @@ function openRecurringWizard() {
           <select id="rc-base" class="input"><option value="">新しく入力する</option>
           ${bases.map((e) => `<option value="${esc(e.event_id)}">${esc(e.title)}（${esc(slashDate(e.event_date))}〜）</option>`).join('')}</select></div>
         <div id="rc-fields" class="space-y-3">${eventFieldsHtml({}, { withDate: false })}${flyerUploaderHtml({})}</div>
+        <div id="rc-co">${coPickerHtml()}</div>
       </section>
       <section class="space-y-3">
         <h3 class="font-bold text-slate-900 flex items-center gap-2"><span class="w-6 h-6 rounded-full bg-indigo-600 text-white text-xs inline-flex items-center justify-center">2</span>繰り返しのルール</h3>
@@ -1550,6 +1630,7 @@ function openRecurringWizard() {
   const createBtn = w.querySelector('[data-rc-create]');
   let preview = null;
   bindFlyerUploader(w.querySelector('#rc-fields'));
+  bindCoPicker(w.querySelector('#rc-co'), { ownerId: state.user && state.user.user_id });
   w.querySelector('[data-close-btn]').onclick = () => closeModal(w);
 
   const invalidate = () => { preview = null; createBtn.disabled = true; };
@@ -1559,7 +1640,7 @@ function openRecurringWizard() {
   };
   form.addEventListener('change', (e) => {
     if (e.target.name === 'rc_type') syncType();
-    if (!e.target.closest('#rc-preview')) invalidate();
+    if (!e.target.closest('#rc-preview') && !e.target.closest('[data-co-box]')) invalidate();
   });
 
   w.querySelector('#rc-base').addEventListener('change', (e) => {
@@ -1615,7 +1696,9 @@ function openRecurringWizard() {
     if (!ok) return;
     const btn = e.currentTarget;
     setBusy(btn, true, '登録中…');
-    const d = await run(() => api('createRecurring', { event: preview.ev, pattern: Object.assign({}, preview.pattern, { skip_dates: skip }) }));
+    const coBox = w.querySelector('[data-co-box]');
+    const co = coBox && coBox._get ? coBox._get() : [];
+    const d = await run(() => api('createRecurring', { event: Object.assign({}, preview.ev, { co_organizer_ids: co || [] }), pattern: Object.assign({}, preview.pattern, { skip_dates: skip }) }));
     setBusy(btn, false);
     if (!d) return;
     closeModal(w);
@@ -1888,17 +1971,143 @@ function printRoster(data) {
 // =====================================================================
 // 管理者：会員管理
 // =====================================================================
-async function renderAdminView() {
+async function renderMembersView() {
+  if (!state.memTab || (state.memTab === 'users' && !isAdmin())) state.memTab = 'members';
+  const tab = state.memTab;
   $('#app-main').innerHTML = `
-    <section class="mb-5 flex flex-wrap items-end justify-between gap-3">
-      <div><h1 class="text-xl sm:text-2xl font-black text-slate-900">会員管理</h1>
-      <p class="text-sm text-slate-500 mt-1">アカウントの発行、権限の変更、利用停止、仮パスワードの再発行ができます。</p></div>
-      <button data-act="admin-new-user" class="btn-primary">${ic('user-plus')}アカウント発行</button>
+    <section class="mb-4">
+      <h1 class="text-xl sm:text-2xl font-black text-slate-900">会員管理</h1>
+      <p class="text-sm text-slate-500 mt-1">一緒にイベントを主催する人や、主催するイベントにかかわる会員をメンバー名簿にまとめます。名簿は、作成した本人とシステム管理者だけが見られます。</p>
     </section>
+    ${isAdmin() ? `<div class="seg mb-4">
+      <button data-act="mem-tab" data-tab="members" class="seg-btn ${tab === 'members' ? 'is-active' : ''}">${ic('contact', 'w-3.5 h-3.5')}メンバー名簿</button>
+      <button data-act="mem-tab" data-tab="users" class="seg-btn ${tab === 'users' ? 'is-active' : ''}">${ic('shield', 'w-3.5 h-3.5')}全会員（管理者）</button>
+    </div>` : ''}
+    <div id="mem-body"></div>`;
+  icons();
+  if (tab === 'users') renderAdminUsersTab($('#mem-body'));
+  else renderMemberListTab($('#mem-body'));
+}
+
+async function renderMemberListTab(root) {
+  const scopeAll = isAdmin() && state.memScope === 'all';
+  root.innerHTML = `
+    <section class="card p-3 mb-4 flex flex-col sm:flex-row gap-2 sm:items-center">
+      <div class="relative flex-1"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
+        <input id="mb-kw" type="search" class="input pl-9" placeholder="名前・呼び名・メールで検索" aria-label="メンバー検索"></div>
+      ${isAdmin() ? `<div class="seg"><button data-act="mem-scope" data-scope="mine" class="seg-btn ${!scopeAll ? 'is-active' : ''}">自分の名簿</button><button data-act="mem-scope" data-scope="all" class="seg-btn ${scopeAll ? 'is-active' : ''}">全員の名簿</button></div>` : ''}
+      <button data-act="mem-add" class="btn-primary">${ic('user-plus')}メンバーを追加</button>
+    </section>
+    <div id="mb-list">${skeletonCards(1)}</div>`;
+  icons();
+  let members = [];
+  const draw = () => {
+    const kw = $('#mb-kw').value.trim().toLowerCase();
+    const list = members.filter((m) => !kw || [m.name, m.label_name, m.email, m.organizer_name].join(' ').toLowerCase().includes(kw));
+    $('#mb-list').innerHTML = list.length ? `<div class="card divide-y divide-slate-100">${list.map((m) => `
+      <div class="p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-2 ${m.status !== 'active' ? 'opacity-60' : ''}">
+        <div class="min-w-0 flex-1">
+          <p class="font-bold text-slate-900">${esc(m.label_name || m.name)}${m.label_name && m.label_name !== m.name ? ` <span class="text-xs font-normal text-slate-500">（${esc(m.name)}）</span>` : ''}
+            ${m.is_temp_password ? ' <span class="pill bg-amber-50 text-amber-700">未ログイン</span>' : ''}
+            ${m.status === 'suspended' ? ' <span class="pill bg-rose-50 text-rose-600">利用停止中</span>' : ''}</p>
+          <p class="text-xs text-slate-500 break-all">${esc(m.email)}${m.phone ? '　' + esc(m.phone) : ''}</p>
+          ${m.note ? `<p class="text-xs text-slate-600 mt-0.5">${ic('sticky-note', 'w-3 h-3 inline')} ${esc(m.note)}</p>` : ''}
+          ${scopeAll ? `<p class="text-[11px] text-indigo-600 mt-0.5">名簿の持ち主：${esc(m.organizer_name)}</p>` : ''}
+        </div>
+        <div class="flex gap-1.5 shrink-0">
+          <button data-mb-edit="${esc(m.link_id)}" class="btn-secondary btn-sm">${ic('pencil', 'w-3.5 h-3.5')}修正</button>
+          <button data-mb-del="${esc(m.link_id)}" class="btn-ghost btn-sm text-rose-600">${ic('user-minus', 'w-3.5 h-3.5')}名簿から外す</button>
+        </div>
+      </div>`).join('')}</div>`
+      : emptyState('contact', members.length ? '該当するメンバーはいません' : 'メンバーはまだいません', members.length ? '検索条件を変えてください。' : '一緒に主催する人を追加すると、イベント登録時に共同主催者として選べます。', members.length ? '' : '<button data-act="mem-add" class="btn-primary">メンバーを追加</button>');
+    icons();
+  };
+  const load = async () => {
+    try { members = (await api('listMembers', { scope: scopeAll ? 'all' : 'mine' })).members || []; draw(); } catch (e) { $('#mb-list').innerHTML = emptyState('circle-alert', '読み込めませんでした', e.message); icons(); }
+  };
+  window._membersReload = load;
+  $('#mb-kw').addEventListener('input', debounce(draw, 200));
+  $('#mb-list').addEventListener('click', async (e) => {
+    const ed = e.target.closest('[data-mb-edit]');
+    const del = e.target.closest('[data-mb-del]');
+    if (ed) openMemberEdit(members.find((m) => m.link_id === ed.dataset.mbEdit));
+    if (del) {
+      const m = members.find((x) => x.link_id === del.dataset.mbDel);
+      if (!await confirmDialog({ title: 'メンバー名簿から外す', message: `${m.label_name || m.name} さんを名簿から外します。\n会員アカウントは削除されません。今後のイベントの共同主催者に入っている場合は、そこからも外れます。`, okLabel: '外す', danger: true })) return;
+      const d = await run(() => api('removeMember', { link_id: m.link_id }));
+      if (!d) return;
+      toast(`名簿から外しました${d.detached_events ? `（共同主催から外したイベント：${d.detached_events}件）` : ''}`, 'success');
+      load();
+    }
+  });
+  await load();
+}
+
+function openMemberAdd() {
+  const w = openModal({
+    title: 'メンバーを追加',
+    size: 'max-w-md',
+    body: `<form id="mba-form" class="space-y-3">
+      <div><label class="label" for="mba-email">メールアドレス</label><input id="mba-email" name="email" type="email" class="input" required></div>
+      <p class="text-xs text-slate-500 -mt-1">登録済みの会員ならそのまま名簿に追加します。未登録の場合は、下のお名前で会員アカウントを発行し、本人に仮パスワードをメールで送ります。</p>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label" for="mba-name">お名前（未登録の場合）</label><input id="mba-name" name="name" class="input" maxlength="50"></div>
+        <div><label class="label" for="mba-phone">電話番号（任意）</label><input id="mba-phone" name="phone" type="tel" class="input"></div>
+      </div>
+      <div><label class="label" for="mba-label">呼び名（任意・名簿での表示名）</label><input id="mba-label" name="label_name" class="input" maxlength="50" placeholder="例：田中さん（会計）"></div>
+      <div><label class="label" for="mba-note">メモ（任意）</label><textarea id="mba-note" name="note" rows="2" class="input" maxlength="300" placeholder="例：日曜の練習会の副リーダー"></textarea></div>
+      <button type="submit" class="btn-primary w-full py-2.5">${ic('user-plus')}追加する</button>
+    </form>`,
+  });
+  const f = w.querySelector('#mba-form');
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = f.querySelector('button[type=submit]');
+    setBusy(btn, true);
+    const d = await run(() => api('addMember', Object.fromEntries(new FormData(f))));
+    setBusy(btn, false);
+    if (!d) return;
+    closeModal(w);
+    if (d.temp_password) showTempPassword(d.member.email, d.temp_password);
+    else toast(d.message + (d.created_account ? '（仮パスワードをメールで送りました）' : ''), 'success');
+    if (window._membersReload) window._membersReload();
+  });
+}
+
+function openMemberEdit(m) {
+  if (!m) return;
+  const w = openModal({
+    title: 'メンバー情報の修正',
+    size: 'max-w-md',
+    body: `<form id="mbe-form" class="space-y-3">
+      <div class="rounded-xl bg-slate-50 p-3 text-sm"><p class="font-bold">${esc(m.name)}</p><p class="text-xs text-slate-500 break-all">${esc(m.email)}${m.phone ? '　' + esc(m.phone) : ''}</p></div>
+      <div><label class="label" for="mbe-label">呼び名</label><input id="mbe-label" name="label_name" class="input" maxlength="50" value="${esc(m.label_name)}"></div>
+      <div><label class="label" for="mbe-note">メモ</label><textarea id="mbe-note" name="note" rows="3" class="input" maxlength="300">${esc(m.note)}</textarea></div>
+      <p class="text-[11px] text-slate-400">お名前・メール・電話番号は本人のアカウント情報のため、ここでは変更できません。</p>
+      <button type="submit" class="btn-primary w-full py-2.5">${ic('check')}保存する</button>
+    </form>`,
+  });
+  const f = w.querySelector('#mbe-form');
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = f.querySelector('button[type=submit]');
+    setBusy(btn, true);
+    const d = await run(() => api('updateMember', Object.assign({ link_id: m.link_id }, Object.fromEntries(new FormData(f)))));
+    setBusy(btn, false);
+    if (!d) return;
+    closeModal(w);
+    toast('保存しました', 'success');
+    if (window._membersReload) window._membersReload();
+  });
+}
+
+async function renderAdminUsersTab(root) {
+  root.innerHTML = `
     <section class="card p-3 mb-4 flex flex-col sm:flex-row gap-2">
       <div class="relative flex-1"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
         <input id="ad-kw" type="search" class="input pl-9" placeholder="名前・メールで検索" aria-label="会員検索"></div>
-      <select id="ad-role" class="input sm:w-44" aria-label="権限で絞り込み"><option value="">すべての権限</option><option value="admin">システム管理者</option><option value="organizer">主催者</option><option value="user">参加者</option></select>
+      <select id="ad-role" class="input sm:w-44" aria-label="権限で絞り込み"><option value="">すべての権限</option><option value="admin">システム管理者</option><option value="user">会員</option></select>
+      <button data-act="admin-new-user" class="btn-primary">${ic('user-plus')}アカウント発行</button>
     </section>
     <div id="ad-body">${skeletonCards(1)}</div>`;
   icons();
@@ -1906,13 +2115,13 @@ async function renderAdminView() {
   const draw = () => {
     const kw = $('#ad-kw').value.trim().toLowerCase();
     const rl = $('#ad-role').value;
-    const list = users.filter((u) => (!rl || u.role === rl) && (!kw || (u.name + ' ' + u.email).toLowerCase().includes(kw)));
+    const list = users.filter((u) => (!rl || (rl === 'user' ? u.role !== 'admin' : u.role === rl)) && (!kw || (u.name + ' ' + u.email).toLowerCase().includes(kw)));
     $('#ad-body').innerHTML = list.length ? `<div class="card overflow-x-auto"><table class="w-full min-w-[720px] text-sm">
       <thead><tr class="text-left text-[11px] text-slate-500 border-b border-slate-100"><th class="p-3">会員</th><th class="p-3">権限</th><th class="p-3">状態</th><th class="p-3">最終ログイン</th><th class="p-3"></th></tr></thead>
       <tbody>${list.map((u) => `<tr class="border-t border-slate-100 ${u.status === 'suspended' ? 'bg-slate-50 opacity-70' : ''}">
         <td class="p-3"><p class="font-bold">${esc(u.name)}${u.is_temp_password ? ' <span class="pill bg-amber-50 text-amber-700">仮PW</span>' : ''}</p><p class="text-xs text-slate-500">${esc(u.email)}</p></td>
         <td class="p-3"><select data-ad-role="${esc(u.user_id)}" class="input py-1 w-36" ${u.user_id === state.user.user_id ? 'disabled' : ''}>
-          ${['user', 'organizer', 'admin'].map((r) => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select></td>
+          <option value="user" ${u.role !== 'admin' ? 'selected' : ''}>会員</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>システム管理者</option></select></td>
         <td class="p-3"><span class="pill ${u.status === 'suspended' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-700'}">${u.status === 'suspended' ? '利用停止' : '有効'}</span></td>
         <td class="p-3 text-xs text-slate-500">${esc(u.last_login_at || '未ログイン')}</td>
         <td class="p-3 text-right whitespace-nowrap">${u.user_id === state.user.user_id ? '<span class="text-xs text-slate-400">自分</span>' : `
@@ -1963,7 +2172,7 @@ function openAdminCreateUser() {
       <div><label class="label" for="adn-name">お名前</label><input id="adn-name" name="name" class="input" required maxlength="50"></div>
       <div><label class="label" for="adn-email">メールアドレス</label><input id="adn-email" name="email" type="email" class="input" required></div>
       <div><label class="label" for="adn-phone">電話番号（任意）</label><input id="adn-phone" name="phone" type="tel" class="input"></div>
-      <div><label class="label" for="adn-role">権限</label><select id="adn-role" name="role" class="input"><option value="organizer">主催者</option><option value="user">参加者</option><option value="admin">システム管理者</option></select></div>
+      <div><label class="label" for="adn-role">権限</label><select id="adn-role" name="role" class="input"><option value="user">会員（主催・参加とも可）</option><option value="admin">システム管理者</option></select></div>
       <p class="text-xs text-slate-500">発行すると、仮パスワードが本人のメールアドレスに届きます。</p>
       <button type="submit" class="btn-primary w-full py-2.5">${ic('user-plus')}発行する</button>
     </form>`,
@@ -2092,6 +2301,10 @@ const ACTIONS = {
   'dash-pending': () => { state.dashFilter.status = 'pending'; const s = $('#org-status'); if (s) s.value = 'pending'; renderOrganizerBody(); },
   'dash-scope': (el) => { state.dashScope = el.dataset.scope; renderOrganizerView(); },
   'admin-new-user': () => openAdminCreateUser(),
+  'mem-tab': (el) => { state.memTab = el.dataset.tab; renderMembersView(); },
+  'mem-scope': (el) => { state.memScope = el.dataset.scope; renderMembersView(); },
+  'mem-add': () => openMemberAdd(),
+  'go-members': () => { $$('#modal-root > div').forEach((m) => closeModal(m)); go('members'); },
   'chat-open': () => toggleChat(true),
   'chat-close': () => toggleChat(false),
   'chat-clear': () => { state.chat = []; renderChat(); },
@@ -2139,7 +2352,7 @@ async function init() {
       }
     }
   }
-  if (!location.hash && isOrg()) location.replace('#/organizer');
+  if (!location.hash && isAdmin()) location.replace('#/organizer');
   route();
 }
 
