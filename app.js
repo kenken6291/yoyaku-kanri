@@ -7,7 +7,7 @@
 // =====================================================================
 // 定数・状態
 // =====================================================================
-const APP_VERSION = '2026.10.09-4';
+const APP_VERSION = '2026.10.09-5';
 const CFG = window.APP_CONFIG || {};
 console.info('ReserveHub app.js ' + APP_VERSION);
 const TOKEN_KEY = CFG.TOKEN_STORAGE_KEY || 'reservehub_token';
@@ -1050,9 +1050,11 @@ function organizerNames(ev) {
 
 function organizerCard(ev) {
   const names = organizerNames(ev);
-  const roleBadge = ev.my_role === 'co'
-    ? '<span class="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">共同主催</span>'
-    : ev.my_role === 'owner' ? '<span class="pill bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200">登録者</span>' : '<span class="pill bg-slate-100 text-slate-600">管理者として表示</span>';
+  const roleBadge = {
+    owner: '<span class="pill bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200">登録者</span>',
+    co: '<span class="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">共同主催（管理）</span>',
+    viewer: '<span class="pill bg-sky-50 text-sky-700 ring-1 ring-sky-200">共同主催者（確認）</span>',
+  }[ev.my_role] || '<span class="pill bg-slate-100 text-slate-600">管理者として表示</span>';
   return `<article class="card overflow-hidden flex flex-col">
     ${flyerHeader(ev, { organizer: true })}
     <div class="p-4 flex flex-col gap-3 flex-1">
@@ -1063,8 +1065,9 @@ function organizerCard(ev) {
       <div class="mt-auto flex items-center justify-between gap-2 pt-3 border-t border-slate-100">
         <button data-act="flyer" data-id="${esc(ev.event_id)}" class="text-xs text-slate-500 hover:text-indigo-600 inline-flex items-center gap-1">${ic('image', 'w-3.5 h-3.5')}チラシ確認</button>
         <div class="flex items-center gap-2">
-          ${ev.status !== 'cancelled' ? `<button data-act="edit-event" data-id="${esc(ev.event_id)}" class="btn-icon" aria-label="編集">${ic('pencil', 'w-3.5 h-3.5')}</button>` : '<span class="pill bg-rose-50 text-rose-600">中止</span>'}
-          <button data-act="participants" data-id="${esc(ev.event_id)}" class="btn-primary btn-sm">${ic('list-checks', 'w-3.5 h-3.5')}参加者名簿・受付</button>
+          ${ev.status === 'cancelled' ? '<span class="pill bg-rose-50 text-rose-600">中止</span>'
+    : ev.can_manage === false ? '' : `<button data-act="edit-event" data-id="${esc(ev.event_id)}" class="btn-icon" aria-label="編集">${ic('pencil', 'w-3.5 h-3.5')}</button>`}
+          <button data-act="participants" data-id="${esc(ev.event_id)}" class="btn-primary btn-sm">${ic('list-checks', 'w-3.5 h-3.5')}${ev.can_manage === false ? '参加者名簿を見る' : '参加者名簿・受付'}</button>
         </div>
       </div>
     </div>
@@ -1472,13 +1475,13 @@ async function bindCoPicker(root, { selected = [], editable = true, ownerId = ''
   } catch (e) { list.textContent = e.message; return; }
   if (!box.isConnected) return;
   if (!cands.length) {
-    list.innerHTML = `<p>メンバー名簿に会員がいません。一緒に主催する人を <button type="button" data-act="go-members" class="text-indigo-600 font-bold underline">会員管理</button> でメンバーに追加すると、ここで選べます。</p>`;
+    list.innerHTML = `<p>共同主催者がいません。<button type="button" data-act="go-members" class="text-indigo-600 font-bold underline">会員管理</button> でメンバーを追加し「共同主催者」にチェックすると、ここで選べます。</p>`;
     return;
   }
   list.innerHTML = `<div class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">${cands.map((c) => `<label class="cursor-pointer" title="${esc(c.email)}">
       <input type="checkbox" data-co value="${esc(c.user_id)}" class="peer sr-only" ${selected.includes(c.user_id) ? 'checked' : ''}>
       <span class="inline-flex items-center gap-1 px-2.5 h-8 rounded-full border border-slate-300 text-xs font-bold text-slate-700 peer-checked:bg-emerald-600 peer-checked:text-white peer-checked:border-emerald-600 peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-400">${ic('user', 'w-3 h-3')}${esc(c.name)}</span></label>`).join('')}</div>
-    <p class="text-[11px] text-slate-500 mt-1.5">選んだ会員もこのイベントを主催者画面で管理できます（編集・参加者名簿・承認・精算）。中止・削除と共同主催者の変更は登録者のみです。</p>`;
+    <p class="text-[11px] text-slate-500 mt-1.5">共同主催者は、あなたの主催イベントをすべて確認できます。ここで選んだ人は、このイベントの管理（編集・承認・精算）もできます。中止・削除と共同主催者の変更は登録者のみです。</p>`;
   icons();
 }
 
@@ -1836,9 +1839,19 @@ async function loadParticipants(w) {
 
 function renderParticipants(w) {
   const { event: ev, participants, totals } = w._data;
+  const canManage = w._data.can_manage !== false;
   const list = w._showCancelled ? participants : participants.filter((p) => p.status === 'pending' || p.status === 'confirmed');
   const paid = ev.fee > 0;
   const row = (p) => {
+    if (!canManage) {
+      return `<tr class="border-t border-slate-100 align-top ${p.status === 'cancelled' || p.status === 'rejected' ? 'opacity-50' : ''}">
+        <td class="py-2.5 pr-3"><p class="font-bold text-slate-900">${esc(p.applicant_name)}</p><p class="text-[11px] text-slate-400">${esc(p.applied_at.slice(5, 16))} 申込</p>${p.note ? `<p class="text-[11px] text-slate-500 mt-0.5 max-w-[16rem] break-words">${esc(p.note)}</p>` : ''}</td>
+        <td class="py-2.5 pr-3 text-center font-black">${p.guest_count}<span class="text-[11px] font-normal text-slate-400">名</span></td>
+        <td class="py-2.5 pr-3 text-xs"><a href="tel:${esc(p.applicant_phone)}" class="block text-slate-700">${esc(p.applicant_phone)}</a><a href="mailto:${esc(p.applicant_email)}" class="block text-slate-500 break-all">${esc(p.applicant_email)}</a></td>
+        <td class="py-2.5 pr-3"><span class="pill ${RESV_STYLE[p.status] || ''}">${esc(p.status_label)}</span></td>
+        <td class="py-2.5 pr-3">${paid && p.status === 'confirmed' ? `<span class="pill ${p.payment_status === 'paid' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}">${esc(p.payment_label)}</span>` : '<span class="text-xs text-slate-300">—</span>'}</td>
+        <td></td></tr>`;
+    }
     const actions = p.status === 'pending'
       ? `<button data-pact="approve" data-id="${esc(p.reservation_id)}" class="btn-primary btn-sm">${ic('check', 'w-3.5 h-3.5')}承認</button>
          <button data-pact="reject" data-id="${esc(p.reservation_id)}" class="btn-secondary btn-sm text-rose-600">却下</button>`
@@ -1862,6 +1875,7 @@ function renderParticipants(w) {
       <div class="min-w-0 flex-1">
         <p class="font-black text-slate-900">${esc(ev.title)}</p>
         <p class="text-xs text-slate-500">${esc(dateLabel(ev))}〜${esc(ev.end_time)}　${esc(ev.location)}</p>
+        ${canManage ? '' : `<p class="text-[11px] text-sky-700 mt-1">${ic('eye', 'w-3 h-3 inline')} 共同主催者として確認中です（承認・精算などの操作はこのイベントの主催者が行います）</p>`}
       </div>
       <div class="flex gap-2 shrink-0">
         <button data-pact="csv" class="btn-secondary btn-sm">${ic('download', 'w-3.5 h-3.5')}CSV出力</button>
@@ -2008,6 +2022,7 @@ async function renderMemberListTab(root) {
       <div class="p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-2 ${m.status !== 'active' ? 'opacity-60' : ''}">
         <div class="min-w-0 flex-1">
           <p class="font-bold text-slate-900">${esc(m.label_name || m.name)}${m.label_name && m.label_name !== m.name ? ` <span class="text-xs font-normal text-slate-500">（${esc(m.name)}）</span>` : ''}
+            ${m.is_co_organizer ? ' <span class="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">共同主催者</span>' : ''}
             ${m.is_temp_password ? ' <span class="pill bg-amber-50 text-amber-700">未ログイン</span>' : ''}
             ${m.status === 'suspended' ? ' <span class="pill bg-rose-50 text-rose-600">利用停止中</span>' : ''}</p>
           <p class="text-xs text-slate-500 break-all">${esc(m.email)}${m.phone ? '　' + esc(m.phone) : ''}</p>
@@ -2019,7 +2034,7 @@ async function renderMemberListTab(root) {
           <button data-mb-del="${esc(m.link_id)}" class="btn-ghost btn-sm text-rose-600">${ic('user-minus', 'w-3.5 h-3.5')}名簿から外す</button>
         </div>
       </div>`).join('')}</div>`
-      : emptyState('contact', members.length ? '該当するメンバーはいません' : 'メンバーはまだいません', members.length ? '検索条件を変えてください。' : '一緒に主催する人を追加すると、イベント登録時に共同主催者として選べます。', members.length ? '' : '<button data-act="mem-add" class="btn-primary">メンバーを追加</button>');
+      : emptyState('contact', members.length ? '該当するメンバーはいません' : 'メンバーはまだいません', members.length ? '検索条件を変えてください。' : '一緒に主催する人を追加して「共同主催者」にチェックすると、あなたのイベントを確認できるようになります。', members.length ? '' : '<button data-act="mem-add" class="btn-primary">メンバーを追加</button>');
     icons();
   };
   const load = async () => {
@@ -2056,6 +2071,11 @@ function openMemberAdd() {
       </div>
       <div><label class="label" for="mba-label">呼び名（任意・名簿での表示名）</label><input id="mba-label" name="label_name" class="input" maxlength="50" placeholder="例：田中さん（会計）"></div>
       <div><label class="label" for="mba-note">メモ（任意）</label><textarea id="mba-note" name="note" rows="2" class="input" maxlength="300" placeholder="例：日曜の練習会の副リーダー"></textarea></div>
+      <label class="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 cursor-pointer">
+        <input type="checkbox" name="is_co_organizer" value="true" class="mt-0.5 rounded border-slate-300 text-emerald-600" >
+        <span class="text-sm"><span class="font-bold text-slate-800">共同主催者にする</span>
+          <span class="block text-xs text-slate-500">あなたが主催するイベントを、この人も主催者画面で確認できるようになります（参加者名簿の確認・CSV・印刷）。イベントごとに選ぶと、そのイベントの編集・承認・精算もできます。</span></span>
+      </label>
       <button type="submit" class="btn-primary w-full py-2.5">${ic('user-plus')}追加する</button>
     </form>`,
   });
@@ -2064,7 +2084,9 @@ function openMemberAdd() {
     e.preventDefault();
     const btn = f.querySelector('button[type=submit]');
     setBusy(btn, true);
-    const d = await run(() => api('addMember', Object.fromEntries(new FormData(f))));
+    const fd = Object.fromEntries(new FormData(f));
+    fd.is_co_organizer = !!f.is_co_organizer.checked;
+    const d = await run(() => api('addMember', fd));
     setBusy(btn, false);
     if (!d) return;
     closeModal(w);
@@ -2083,6 +2105,11 @@ function openMemberEdit(m) {
       <div class="rounded-xl bg-slate-50 p-3 text-sm"><p class="font-bold">${esc(m.name)}</p><p class="text-xs text-slate-500 break-all">${esc(m.email)}${m.phone ? '　' + esc(m.phone) : ''}</p></div>
       <div><label class="label" for="mbe-label">呼び名</label><input id="mbe-label" name="label_name" class="input" maxlength="50" value="${esc(m.label_name)}"></div>
       <div><label class="label" for="mbe-note">メモ</label><textarea id="mbe-note" name="note" rows="3" class="input" maxlength="300">${esc(m.note)}</textarea></div>
+      <label class="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 cursor-pointer">
+        <input type="checkbox" name="is_co_organizer" value="true" class="mt-0.5 rounded border-slate-300 text-emerald-600" ${m.is_co_organizer ? 'checked' : ''}>
+        <span class="text-sm"><span class="font-bold text-slate-800">共同主催者にする</span>
+          <span class="block text-xs text-slate-500">あなたが主催するイベントを、この人も主催者画面で確認できるようになります（参加者名簿の確認・CSV・印刷）。イベントごとに選ぶと、そのイベントの編集・承認・精算もできます。</span></span>
+      </label>
       <p class="text-[11px] text-slate-400">お名前・メール・電話番号は本人のアカウント情報のため、ここでは変更できません。</p>
       <button type="submit" class="btn-primary w-full py-2.5">${ic('check')}保存する</button>
     </form>`,
@@ -2092,11 +2119,13 @@ function openMemberEdit(m) {
     e.preventDefault();
     const btn = f.querySelector('button[type=submit]');
     setBusy(btn, true);
-    const d = await run(() => api('updateMember', Object.assign({ link_id: m.link_id }, Object.fromEntries(new FormData(f)))));
+    const fd = Object.fromEntries(new FormData(f));
+    fd.is_co_organizer = !!f.is_co_organizer.checked;
+    const d = await run(() => api('updateMember', Object.assign({ link_id: m.link_id }, fd)));
     setBusy(btn, false);
     if (!d) return;
     closeModal(w);
-    toast('保存しました', 'success');
+    toast('保存しました' + (d.detached_events ? `（共同主催から外したイベント：${d.detached_events}件）` : ''), 'success');
     if (window._membersReload) window._membersReload();
   });
 }

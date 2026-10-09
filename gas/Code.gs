@@ -69,7 +69,7 @@ const SCHEMA = {
   reservations: ['reservation_id', 'event_id', 'user_id', 'guest_count', 'applicant_name', 'applicant_phone',
     'applicant_email', 'status', 'payment_status', 'applied_at', 'note', 'updated_at'],
   // 主催者ごとの関係会員（メンバー名簿）
-  members: ['link_id', 'organizer_id', 'user_id', 'label_name', 'note', 'created_at', 'updated_at'],
+  members: ['link_id', 'organizer_id', 'user_id', 'label_name', 'note', 'created_at', 'updated_at', 'is_co_organizer'],
 };
 
 // 自動変換（日付化・先頭0消失）を防ぐため書式を「書式なしテキスト」にする列
@@ -80,7 +80,7 @@ const TEXT_COLUMNS = {
     'location', 'flyer_drive_id', 'recurring_group_id', 'status', 'created_at', 'updated_at', 'co_organizer_ids'],
   reservations: ['reservation_id', 'event_id', 'user_id', 'applicant_name', 'applicant_phone', 'applicant_email',
     'status', 'payment_status', 'applied_at', 'note', 'updated_at'],
-  members: ['link_id', 'organizer_id', 'user_id', 'label_name', 'note', 'created_at', 'updated_at'],
+  members: ['link_id', 'organizer_id', 'user_id', 'label_name', 'note', 'created_at', 'updated_at', 'is_co_organizer'],
 };
 
 const ROLES = ['admin', 'organizer', 'user'];
@@ -818,6 +818,7 @@ function memberView_(m, users, names) {
     status: t.status || 'deleted',
     is_temp_password: toBool_(t.is_temp_password),
     note: m.note || '',
+    is_co_organizer: toBool_(m.is_co_organizer),
     created_at: m.created_at,
   };
 }
@@ -874,7 +875,10 @@ function apiAddMember_(u, p) {
       created = true;
     }
     const now = nowStr_();
-    const link = { link_id: genId_('M'), organizer_id: ownerId, user_id: target.user_id, label_name: label, note: note, created_at: now, updated_at: now };
+    const link = {
+      link_id: genId_('M'), organizer_id: ownerId, user_id: target.user_id, label_name: label, note: note,
+      is_co_organizer: toBool_(p.is_co_organizer), created_at: now, updated_at: now,
+    };
     DB.insert(SHEET.MEMBERS, link);
     return { link: link, target: target };
   });
@@ -897,9 +901,14 @@ function apiUpdateMember_(u, p) {
     const patch = { updated_at: nowStr_() };
     if (p.label_name !== undefined) patch.label_name = str_(p.label_name, 50);
     if (p.note !== undefined) patch.note = str_(p.note, 300);
+    let detached = 0;
+    if (p.is_co_organizer !== undefined) {
+      patch.is_co_organizer = toBool_(p.is_co_organizer);
+      if (!patch.is_co_organizer && toBool_(m.is_co_organizer)) detached = detachCoOrganizer_(m.organizer_id, m.user_id);
+    }
     const merged = DB.update(SHEET.MEMBERS, m, patch);
     const users = {}; DB.all(SHEET.USERS).forEach((x) => { users[String(x.user_id)] = x; });
-    return { member: memberView_(merged, users, userNameMap_()) };
+    return { member: memberView_(merged, users, userNameMap_()), detached_events: detached };
   });
 }
 
@@ -907,17 +916,7 @@ function apiUpdateMember_(u, p) {
 function apiRemoveMember_(u, p) {
   return withLock_(() => {
     const m = loadOwnedLink_(u, p.link_id);
-    const ownerId = String(m.organizer_id);
-    const uid = String(m.user_id);
-    const nowMs = Date.now();
-    let detached = 0;
-    DB.all(SHEET.EVENTS).forEach((ev) => {
-      if (String(ev.organizer_id) !== ownerId || !(eventStart_(ev) && eventStart_(ev).getTime() > nowMs)) return;
-      const ids = coIds_(ev);
-      if (ids.indexOf(uid) === -1) return;
-      DB.update(SHEET.EVENTS, ev, { co_organizer_ids: ids.filter((x) => x !== uid).join(','), updated_at: nowStr_() });
-      detached++;
-    });
+    const detached = detachCoOrganizer_(m.organizer_id, m.user_id);
     DB.deleteRow(SHEET.MEMBERS, m);
     return { removed: true, detached_events: detached };
   });
@@ -935,7 +934,7 @@ function apiListCoOrganizerCandidates_(u, p) {
   }
   const users = {}; DB.all(SHEET.USERS).forEach((x) => { users[String(x.user_id)] = x; });
   return {
-    candidates: DB.all(SHEET.MEMBERS).filter((m) => String(m.organizer_id) === String(u.user_id))
+    candidates: DB.all(SHEET.MEMBERS).filter((m) => String(m.organizer_id) === String(u.user_id) && toBool_(m.is_co_organizer))
       .map((m) => users[String(m.user_id)]).filter((x) => x && x.status !== 'suspended')
       .map((x) => ({ user_id: x.user_id, name: x.name, email: x.email }))
       .sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja')),
@@ -1253,6 +1252,38 @@ function isOwner_(user, ev) {
   return user.role === 'admin' || String(ev.organizer_id) === String(user.user_id);
 }
 
+/** 会員管理で「共同主催者」にチェックされている場合、その主催者（名簿の持ち主）のイベントを確認できる */
+function coOwnerIdsOf_(user) {
+  const set = {};
+  DB.all(SHEET.MEMBERS).forEach((m) => {
+    if (String(m.user_id) === String(user.user_id) && toBool_(m.is_co_organizer)) set[String(m.organizer_id)] = true;
+  });
+  return set;
+}
+function canView_(user, ev, coOwners) {
+  if (canManage_(user, ev)) return true;
+  return !!(coOwners || coOwnerIdsOf_(user))[String(ev.organizer_id)];
+}
+function loadViewableEvent_(user, eventId) {
+  const ev = DB.find(SHEET.EVENTS, 'event_id', str_(eventId, 64));
+  if (!ev) throw new AppError('NOT_FOUND', 'イベントが見つかりません');
+  if (!canView_(user, ev)) throw new AppError('FORBIDDEN', 'このイベントを確認する権限がありません');
+  return ev;
+}
+/** 共同主催者のチェックが外れた／名簿から外れたとき、持ち主の今後のイベントの共同主催から外す */
+function detachCoOrganizer_(ownerId, userId) {
+  const nowMs = Date.now();
+  let n = 0;
+  DB.all(SHEET.EVENTS).forEach((ev) => {
+    if (String(ev.organizer_id) !== String(ownerId) || !(eventStart_(ev) && eventStart_(ev).getTime() > nowMs)) return;
+    const ids = coIds_(ev);
+    if (ids.indexOf(String(userId)) === -1) return;
+    DB.update(SHEET.EVENTS, ev, { co_organizer_ids: ids.filter((x) => x !== String(userId)).join(','), updated_at: nowStr_() });
+    n++;
+  });
+  return n;
+}
+
 function loadOwnedEvent_(user, eventId, ownerOnly) {
   const ev = DB.find(SHEET.EVENTS, 'event_id', str_(eventId, 64));
   if (!ev) throw new AppError('NOT_FOUND', 'イベントが見つかりません');
@@ -1273,13 +1304,15 @@ function resolveCoOrganizers_(user, ownerId, input) {
   }
   const linked = {};
   if (user.role !== 'admin') {
-    DB.all(SHEET.MEMBERS).forEach((m) => { if (String(m.organizer_id) === String(ownerId)) linked[String(m.user_id)] = true; });
+    DB.all(SHEET.MEMBERS).forEach((m) => {
+      if (String(m.organizer_id) === String(ownerId) && toBool_(m.is_co_organizer)) linked[String(m.user_id)] = true;
+    });
   }
   ids.forEach((id) => {
     const t = DB.find(SHEET.USERS, 'user_id', id);
     if (!t || t.status === 'suspended') throw new AppError('VALIDATION', '共同主催者に指定できない会員が含まれています');
     if (user.role !== 'admin' && !linked[id]) {
-      throw new AppError('VALIDATION', '共同主催者は、登録者のメンバー名簿にいる会員から選んでください（' + t.name + '）');
+      throw new AppError('VALIDATION', '共同主催者は、会員管理で「共同主催者」にチェックした会員から選んでください（' + t.name + '）');
     }
   });
   return ids.join(',');
@@ -1529,7 +1562,8 @@ function apiOrganizerDashboard_(u, p) {
   const max = maxEventYmd_();
   const idx = reservationIndex_();
   const names = userNameMap_();
-  const mine = (ev) => scopeAll || isManager_(u, ev);
+  const coOwners = coOwnerIdsOf_(u);
+  const mine = (ev) => scopeAll || isManager_(u, ev) || !!coOwners[String(ev.organizer_id)];
 
   const allMine = DB.all(SHEET.EVENTS).filter(mine);
   const mineIds = {};
@@ -1568,7 +1602,11 @@ function apiOrganizerDashboard_(u, p) {
     stats: stats,
     events: upcoming.map((ev) => Object.assign(publicEvent_(ev, idx, names),
       perEvent[ev.event_id] || { pending_count: 0, unpaid_count: 0, paid_count: 0 },
-      { is_owner: isOwner_(u, ev), my_role: String(ev.organizer_id) === String(u.user_id) ? 'owner' : (isManager_(u, ev) ? 'co' : 'admin') })),
+      {
+        is_owner: isOwner_(u, ev),
+        can_manage: canManage_(u, ev),
+        my_role: String(ev.organizer_id) === String(u.user_id) ? 'owner' : (isManager_(u, ev) ? 'co' : (coOwners[String(ev.organizer_id)] ? 'viewer' : 'admin')),
+      })),
     range: { from: today, to: max },
   };
 }
@@ -1694,7 +1732,7 @@ function participantsOf_(ev, includeCancelled) {
 }
 
 function apiListParticipants_(u, p) {
-  const ev = loadOwnedEvent_(u, p.event_id);
+  const ev = loadViewableEvent_(u, p.event_id);
   const list = participantsOf_(ev, toBool_(p.include_cancelled));
   const totals = { confirmed_guests: 0, pending_guests: 0, unpaid_count: 0, paid_count: 0, expected_fee_total: 0, paid_fee_total: 0 };
   const fee = toInt_(ev.fee, 0);
@@ -1711,6 +1749,7 @@ function apiListParticipants_(u, p) {
     event: publicEvent_(ev, reservationIndex_(), userNameMap_()),
     participants: list.map(publicReservation_),
     totals: totals,
+    can_manage: canManage_(u, ev),
   };
 }
 
@@ -1727,7 +1766,7 @@ function toCsv_(rows) {
 }
 
 function apiExportParticipantsCsv_(u, p) {
-  const ev = loadOwnedEvent_(u, p.event_id);
+  const ev = loadViewableEvent_(u, p.event_id);
   const fee = toInt_(ev.fee, 0);
   const rows = [['予約番号', '申込日時', '代表者名', '電話番号', 'メール', '参加人数', '予約状態', '精算状態', '参加費合計', '備考']];
   participantsOf_(ev, toBool_(p.include_cancelled)).forEach((r) => {
