@@ -2,6 +2,9 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ReserveHub | イベント予約・受付管理</title>
   <meta name="description" content="イベントの空き状況確認・予約・主催者の受付管理ができる予約システムです。">
@@ -51,7 +54,6 @@
     #loading-bar { transition: opacity .2s; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
-  <script src="config.js?v=20261009-7"></script>
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans antialiased min-h-screen">
   <div id="loading-bar" class="fixed top-0 left-0 right-0 h-1 z-[90] opacity-0 pointer-events-none">
@@ -73,6 +75,19 @@
   <div id="toast-root" class="fixed top-16 left-1/2 -translate-x-1/2 z-[85] w-[92vw] max-w-sm space-y-2 pointer-events-none"></div>
 
   <noscript><p class="p-6 text-center">このサイトを利用するにはJavaScriptを有効にしてください。</p></noscript>
-  <script src="app.js?v=20261009-7"></script>
+  <script>
+    // キャッシュ対策：config.js と app.js を毎回最新で読み込む（index.html の更新を待たずに反映される）
+    (function () {
+      var t = Date.now();
+      function load(src, cb) {
+        var s = document.createElement('script');
+        s.src = src + '?t=' + t;
+        s.onload = cb || null;
+        s.onerror = function () { document.body.insertAdjacentHTML('beforeend', '<p style="padding:16px;color:#e11d48">' + src + ' を読み込めませんでした。再読み込みしてください。</p>'); };
+        document.body.appendChild(s);
+      }
+      load('config.js', function () { load('app.js'); });
+    })();
+  </script>
 </body>
 </html>
