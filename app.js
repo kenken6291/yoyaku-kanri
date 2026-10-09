@@ -87,10 +87,14 @@ function loading(on) {
   $('#loading-bar').style.opacity = loadingCount > 0 ? '1' : '0';
 }
 
+// AI処理など時間のかかる操作は待ち時間を長くする
+const LONG_ACTIONS = ['generateFlyerText', 'generateFlyerImage', 'concierge', 'createRecurring', 'uploadFlyer'];
+
 async function api(action, payload = {}, opt = {}) {
   if (!CFG.GAS_URL) throw new Error('config.js の GAS_URL が設定されていません');
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), CFG.REQUEST_TIMEOUT_MS || 60000);
+  const timeoutMs = opt.timeout || (LONG_ACTIONS.includes(action) ? (CFG.AI_TIMEOUT_MS || 180000) : (CFG.REQUEST_TIMEOUT_MS || 60000));
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   loading(true);
   try {
     const res = await fetch(CFG.GAS_URL, {
@@ -108,9 +112,20 @@ async function api(action, payload = {}, opt = {}) {
       throw e;
     }
     return json.data;
-  } catch (e) {
-    if (e.name === 'AbortError') e.message = '通信がタイムアウトしました。時間をおいて再度お試しください';
-    else if (e instanceof TypeError) e.message = 'サーバーに接続できません。通信環境をご確認ください';
+  } catch (e0) {
+    // AbortError(DOMException) の message は書き換え不可のため、新しい Error に包み直す
+    let e = e0;
+    if (e0 && e0.name === 'AbortError') {
+      e = new Error(LONG_ACTIONS.includes(action)
+        ? 'AIの処理に時間がかかりすぎたため中断しました。混雑している可能性があります。少し時間をおいて再度お試しください'
+        : '通信がタイムアウトしました。時間をおいて再度お試しください');
+      e.code = 'TIMEOUT';
+    } else if (e0 instanceof TypeError && !e0.code) {
+      e = new Error('サーバーに接続できません。通信環境をご確認ください');
+      e.code = 'NETWORK';
+    } else if (!(e0 instanceof Error)) {
+      e = new Error(String(e0));
+    }
     if (!opt.noAuthHandle) {
       if (['AUTH_INVALID', 'AUTH_EXPIRED', 'ACCOUNT_SUSPENDED'].includes(e.code)) {
         clearSession();
